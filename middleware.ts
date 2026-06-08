@@ -5,6 +5,7 @@ import { SESSION_COOKIE_NAME, verifySessionToken } from "@/lib/auth/token";
 const PUBLIC_PATHS = new Set([
   "/login",
   "/api/auth/login",
+  "/api/version",
   "/favicon.ico",
   "/brand-icon.ico",
 ]);
@@ -12,6 +13,7 @@ const PUBLIC_PATHS = new Set([
 function isPublicPath(pathname: string) {
   if (PUBLIC_PATHS.has(pathname)) return true;
   if (pathname.startsWith("/_next/")) return true;
+  if (pathname.startsWith("/api/files/")) return false;
   if (pathname.startsWith("/api/auth/logout")) return true;
   if (/\.(?:svg|png|jpg|jpeg|webp|gif|ico|css|js|map|txt)$/i.test(pathname)) return true;
   return false;
