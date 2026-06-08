@@ -65,7 +65,7 @@ export function ConfirmDialog({
             disabled={loading}
             className={cn(
               "rounded-xl",
-              destructive && "bg-black text-white hover:bg-black/90",
+              destructive && "bg-rose-600 text-white hover:bg-rose-500 dark:bg-rose-600 dark:hover:bg-rose-500",
             )}
           >
             {loading ? "处理中..." : confirmText}

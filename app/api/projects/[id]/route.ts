@@ -10,7 +10,7 @@ export async function GET(_request: NextRequest, context: { params: { id: string
     if (!project) {
       return fail("NOT_FOUND", "Project not found.", null, 404);
     }
-    return ok(project);
+    return ok({ deleted: true, id: project.id });
   } catch (error) {
     return handleRouteError(error);
   }

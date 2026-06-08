@@ -128,6 +128,18 @@ export function RecentProjectList({ initialProjects }: RecentProjectListProps) {
               进入预览与编辑
               <ArrowRight className="ml-2 h-4 w-4" />
             </Link>
+
+            <button
+              type="button"
+              onClick={() => setPendingDelete({ id: project.id, name: project.name })}
+              className={cn(
+                buttonVariants({ variant: "outline", size: "sm" }),
+                "w-full justify-center border-rose-200 text-rose-600 hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700 dark:border-rose-500/20 dark:text-rose-300 dark:hover:border-rose-400/30 dark:hover:bg-rose-500/10",
+              )}
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              删除项目
+            </button>
           </div>
         </article>
       ))}
