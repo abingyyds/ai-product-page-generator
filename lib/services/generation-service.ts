@@ -88,6 +88,10 @@ function getOutputSize(aspectRatio: SectionImageAspectRatio) {
     return "1024x1024";
   }
 
+  if (aspectRatio === "9:16") {
+    return "1024x1792";
+  }
+
   return "1024x1536";
 }
 
@@ -277,6 +281,43 @@ function escapeXml(value: string) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&apos;");
+}
+
+function clampText(value: string, maxLength: number) {
+  const normalized = value.trim().replace(/\s+/g, " ");
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, Math.max(0, maxLength - 1))}…`;
+}
+
+function splitCopyHighlights(copy: string) {
+  return copy
+    .split(/\r?\n|[，,、;；。.!！?？]/)
+    .map((item) => clampText(item, 12))
+    .filter(Boolean)
+    .slice(0, 4);
+}
+
+function buildLocalSvgLayoutSpec(section: PageSection, contentLanguage: ContentLanguage): z.infer<typeof svgLayoutSchema> {
+  const highlights = splitCopyHighlights(section.copy);
+  const fallbackHighlights: Record<ContentLanguage, string[]> = {
+    "zh-CN": ["清晰展示", "核心卖点", "品质细节"],
+    "en-US": ["Clear View", "Key Benefit", "Quality Detail"],
+    "ja-JP": ["見やすい", "主な魅力", "品質感"],
+    "ko-KR": ["선명한 표현", "핵심 장점", "품질 디테일"],
+  };
+
+  return {
+    headline: clampText(section.title || svgCopyByLanguage[contentLanguage].highlights, 16),
+    subheadline: clampText(section.copy || section.goal || svgCopyByLanguage[contentLanguage].footer, 28),
+    badge: clampText(section.goal || svgCopyByLanguage[contentLanguage].highlights, 10),
+    highlights: [...highlights, ...fallbackHighlights[contentLanguage]].slice(0, 4),
+    backgroundColor: "#F5F7FB",
+    accentColor: "#2563EB",
+    panelColor: "#FFFFFF",
+  };
 }
 
 async function assetToDataUrl(asset: Pick<AssetRecord, "filePath" | "mimeType">) {
@@ -482,6 +523,81 @@ function composeSectionSvg(params: {
   layout: z.infer<typeof svgLayoutSchema>;
   productImageDataUrl?: string | null;
   contentLanguage: ContentLanguage;
+  aspectRatio: SectionImageAspectRatio;
+}) {
+  if (params.aspectRatio === "1:1") {
+    return composeSquareSectionSvg(params);
+  }
+
+  return composeVerticalSectionSvg(params);
+}
+
+function composeSquareSectionSvg(params: {
+  section: { title: string; copy: string; type: string };
+  layout: z.infer<typeof svgLayoutSchema>;
+  productImageDataUrl?: string | null;
+  contentLanguage: ContentLanguage;
+}) {
+  const uiCopy = svgCopyByLanguage[params.contentLanguage];
+  const sectionLabel =
+    sectionTypeLabels[params.section.type.toLowerCase() as keyof typeof sectionTypeLabels] ?? params.section.type;
+  const highlights = params.layout.highlights
+    .slice(0, 3)
+    .map(
+      (item, index) => `
+      <g transform="translate(80, ${700 + index * 88})">
+        <rect rx="26" ry="26" width="360" height="64" fill="${params.layout.panelColor}" opacity="0.95" />
+        <text x="28" y="41" font-size="28" fill="${params.layout.accentColor}" font-weight="700">${escapeXml(item)}</text>
+      </g>`,
+    )
+    .join("");
+
+  const productImage = params.productImageDataUrl
+    ? `<image href="${params.productImageDataUrl}" x="500" y="260" width="480" height="520" preserveAspectRatio="xMidYMid meet" clip-path="url(#productClip)" />`
+    : `<rect x="500" y="260" width="480" height="520" rx="48" fill="${params.layout.panelColor}" />
+       <text x="740" y="535" text-anchor="middle" font-size="34" fill="${params.layout.accentColor}" font-weight="700">${escapeXml(uiCopy.waitingForAsset)}</text>`;
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1080" height="1080" viewBox="0 0 1080 1080" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1080" y2="1080" gradientUnits="userSpaceOnUse">
+      <stop stop-color="${params.layout.backgroundColor}" />
+      <stop offset="1" stop-color="#FFFFFF" />
+    </linearGradient>
+    <clipPath id="productClip">
+      <rect x="500" y="260" width="480" height="520" rx="48" ry="48" />
+    </clipPath>
+  </defs>
+
+  <rect width="1080" height="1080" fill="url(#bg)" />
+  <circle cx="930" cy="170" r="140" fill="${params.layout.accentColor}" opacity="0.12" />
+  <circle cx="140" cy="910" r="180" fill="${params.layout.accentColor}" opacity="0.08" />
+
+  <rect x="72" y="72" rx="28" ry="28" width="250" height="64" fill="${params.layout.accentColor}" />
+  <text x="197" y="114" text-anchor="middle" font-size="27" fill="#FFFFFF" font-weight="700">${escapeXml(params.layout.badge)}</text>
+
+  <text x="76" y="230" font-size="62" fill="#1F1720" font-weight="800">${escapeXml(params.layout.headline)}</text>
+  <text x="76" y="302" font-size="32" fill="#5C515A" font-weight="500">${escapeXml(params.layout.subheadline)}</text>
+
+  <g>
+    <rect x="500" y="260" width="480" height="520" rx="48" fill="#FFFFFF" opacity="0.78" />
+    ${productImage}
+  </g>
+
+  <text x="80" y="662" font-size="31" fill="#3A3139" font-weight="700">${escapeXml(uiCopy.highlights)}</text>
+  ${highlights}
+
+  <rect x="80" y="928" width="920" height="80" rx="40" fill="${params.layout.accentColor}" />
+  <text x="120" y="979" font-size="28" fill="#FFFFFF" font-weight="800">${escapeXml(sectionLabel)}</text>
+  <text x="960" y="979" text-anchor="end" font-size="28" fill="#FFFFFF" font-weight="800">${escapeXml(uiCopy.footer)}</text>
+</svg>`;
+}
+
+function composeVerticalSectionSvg(params: {
+  section: { title: string; copy: string; type: string };
+  layout: z.infer<typeof svgLayoutSchema>;
+  productImageDataUrl?: string | null;
+  contentLanguage: ContentLanguage;
 }) {
   const uiCopy = svgCopyByLanguage[params.contentLanguage];
   const sectionLabel =
@@ -551,26 +667,33 @@ async function generateSvgFallback(params: {
   contentLanguage: ContentLanguage;
 }) {
   const modelCandidates = buildSvgModelCandidates(params.provider);
-  if (!modelCandidates.length) {
-    throw new Error("当前 Provider 没有可用于 SVG 兜底预览的文本模型。");
-  }
-
   const selectedAssets = params.referenceAssets.slice(0, 4);
   const imageInputs = await Promise.all(selectedAssets.map((asset) => assetToDataUrl(asset)));
-  const layoutSpec = await generateSvgLayoutSpec({
-    adapter: params.adapter,
-    candidateModels: modelCandidates,
-    userPrompt: buildSectionSvgLayoutPrompt(
-      params.section,
-      params.referenceAssets as ProductAsset[],
-      params.aspectRatio,
-      params.contentLanguage,
-    ),
-    images: imageInputs,
-    projectId: params.section.projectId,
-    sectionId: params.section.id,
-    operation: "svg_fallback_layout",
-  });
+  const layoutSpec =
+    modelCandidates.length > 0
+      ? await generateSvgLayoutSpec({
+          adapter: params.adapter,
+          candidateModels: modelCandidates,
+          userPrompt: buildSectionSvgLayoutPrompt(
+            params.section,
+            params.referenceAssets as ProductAsset[],
+            params.aspectRatio,
+            params.contentLanguage,
+          ),
+          images: imageInputs,
+          projectId: params.section.projectId,
+          sectionId: params.section.id,
+          operation: "svg_fallback_layout",
+        }).catch((error) => ({
+          model: "local-svg-layout",
+          parsed: buildLocalSvgLayoutSpec(params.section, params.contentLanguage),
+          error,
+        }))
+      : {
+          model: "local-svg-layout",
+          parsed: buildLocalSvgLayoutSpec(params.section, params.contentLanguage),
+          error: new Error("当前 Provider 没有可用于 SVG 兜底预览的文本模型。"),
+        };
 
   const productImageAsset = params.referenceAssets[0] ?? null;
   const productImageDataUrl = productImageAsset ? await assetToDataUrl(productImageAsset) : null;
@@ -583,12 +706,14 @@ async function generateSvgFallback(params: {
     layout: layoutSpec.parsed,
     productImageDataUrl,
     contentLanguage: params.contentLanguage,
+    aspectRatio: params.aspectRatio,
   });
 
   return {
     svgText,
     model: layoutSpec.model,
     layout: layoutSpec.parsed,
+    layoutError: "error" in layoutSpec && layoutSpec.error instanceof Error ? layoutSpec.error.message : null,
   };
 }
 
@@ -744,6 +869,7 @@ async function generateSectionImageInternal(
           mode: "svg_fallback",
           usedModel: fallback.model,
           layout: fallback.layout,
+          layoutError: fallback.layoutError,
           sourceReferenceAssetIds: effectiveReferenceAssets.map((asset) => asset.id),
           primaryReferenceAssetId: effectiveReferenceAssets[0]?.id ?? null,
           imageApiError: error instanceof Error ? error.message : "Unknown image api error",
@@ -995,6 +1121,7 @@ export async function editSectionImage(
           editMode,
           baseImageAssetId: section.currentImageAssetId,
           layout: fallback.layout,
+          layoutError: fallback.layoutError,
           sourceReferenceAssetIds: productReferenceAssets.map((asset) => asset.id),
           primaryReferenceAssetId: productReferenceAssets[0]?.id ?? null,
           imageApiError: error instanceof Error ? error.message : "Unknown image edit api error",

@@ -551,16 +551,121 @@ function buildFallbackPlanFromTemplates(heroImageCount: number, detailSectionCou
   return buildNormalizedSections([], heroImageCount, detailSectionCount);
 }
 
-function shouldFallbackToTemplatePlan(error: unknown) {
-  if (error instanceof z.ZodError) {
-    return true;
+function describePlanningFallback(error: unknown) {
+  const detail = error instanceof Error ? error.message : "Unknown planning error";
+
+  if (error instanceof z.ZodError || /"sections"|expected array|invalid input: expected array|received undefined|section/i.test(detail)) {
+    return "AI 返回结构不完整，已自动切换为模板规划。";
   }
 
-  if (!(error instanceof Error)) {
-    return false;
+  if (/No active provider config found/i.test(detail)) {
+    return "当前没有可用的 Provider 配置，已先使用模板规划生成可编辑结构。";
   }
 
-  return /"sections"|expected array|invalid input: expected array|received undefined|section/i.test(error.message);
+  if (/当前没有可用的文案规划模型|No analysis model available|No planning model available/i.test(detail)) {
+    return "当前没有可用的文案规划模型，已先使用模板规划生成可编辑结构。";
+  }
+
+  if (/timed out|aborterror|network error|fetch failed|请求超时|网络异常/i.test(detail)) {
+    return "AI 页面规划请求超时或网络异常，已先使用模板规划生成可编辑结构。";
+  }
+
+  if (/invalid token|unauthorized|forbidden|鉴权失败|401|403/i.test(detail)) {
+    return "当前 Provider 鉴权失败，已先使用模板规划生成可编辑结构。";
+  }
+
+  if (/rate limit|429|限流/i.test(detail)) {
+    return "当前 Provider 触发限流，已先使用模板规划生成可编辑结构。";
+  }
+
+  if (/monthly spending limit|spending limit|insufficient_quota|quota|billing|额度已用尽|月度限额/i.test(detail)) {
+    return "当前 Provider 额度不可用，已先使用模板规划生成可编辑结构。";
+  }
+
+  return `AI 自动规划暂时不可用，已先使用模板规划生成可编辑结构。原因：${detail}`;
+}
+
+function mergePlanningReason(previewDecisionReason: string, fallbackReason: string) {
+  return `${previewDecisionReason ? `${previewDecisionReason}；` : ""}${fallbackReason}`;
+}
+
+async function replaceProjectSections(projectId: string, sections: NormalizedSection[]) {
+  await prisma.pageSection.deleteMany({ where: { projectId } });
+
+  await prisma.pageSection.createMany({
+    data: sections.map((section) => ({
+      projectId,
+      sectionKey: section.sectionKey,
+      type: section.type as never,
+      title: section.title,
+      goal: section.goal,
+      copy: section.copy,
+      visualPrompt: section.visualPrompt,
+      order: section.order,
+      editableData: section.editableData as Prisma.InputJsonValue,
+    })),
+  });
+
+  return prisma.pageSection.findMany({
+    where: { projectId },
+    orderBy: { order: "asc" },
+  });
+}
+
+async function savePlanResult(params: {
+  projectId: string;
+  projectSnapshot: unknown;
+  sections: NormalizedSection[];
+  previewConfig: PreviewConfigInput;
+  planningModelId?: string | null;
+  previewConfigSource: "manual" | "ai";
+  previewConfigReason: string;
+}) {
+  await replaceProjectSections(params.projectId, params.sections);
+  await prisma.project.update({
+    where: { id: params.projectId },
+    data: {
+      status: "PLANNED",
+      modelSnapshot: {
+        ...(params.projectSnapshot as Record<string, unknown> | null),
+        planningModelId: params.planningModelId ?? null,
+        previewConfig: params.previewConfig,
+        previewConfigSource: params.previewConfigSource,
+        previewConfigReason: params.previewConfigReason,
+      } as Prisma.InputJsonValue,
+    },
+  });
+
+  return prisma.pageSection.findMany({
+    where: { projectId: params.projectId },
+    orderBy: { order: "asc" },
+  });
+}
+
+function serializeSectionsForTask(sections: Array<{
+  id: string;
+  sectionKey: string;
+  type: string;
+  title: string;
+  goal: string;
+  copy: string;
+  visualPrompt: string;
+  order: number;
+  status: string;
+  editableData: unknown;
+}>) {
+  return sections.map((section) => ({
+    id: section.id,
+    sectionKey: section.sectionKey,
+    type: section.type,
+    title: section.title,
+    goal: section.goal,
+    copy: section.copy,
+    visualPrompt: section.visualPrompt,
+    order: section.order,
+    status: section.status,
+    editableData: section.editableData,
+  }));
 }
 
 async function decidePreviewConfigWithAi(projectId: string, preferredModelId?: string | null) {
@@ -644,16 +749,6 @@ export async function planSections(
     throw new Error("请先完成商品分析，再进行页面规划。");
   }
 
-  const { provider, adapter } = await getProviderAdapter();
-  const model =
-    options?.modelId ??
-    provider.models.find((item) => item.isDefaultPlanning)?.modelId ??
-    provider.models.find((item) => (item.capabilities as Record<string, boolean>).structured_output)?.modelId;
-
-  if (!model) {
-    throw new Error("当前没有可用的文案规划模型。");
-  }
-
   const existingTask = await findRecentRunningTask({
     projectId,
     taskType: "PLAN",
@@ -667,19 +762,33 @@ export async function planSections(
     options?.previewConfig != null ? previewConfigSchema.parse(options.previewConfig) : readPreviewConfig(project.modelSnapshot);
   let previewDecisionReason = "";
 
-  if (options?.autoDecideCounts) {
-    const decision = await decidePreviewConfigWithAi(projectId, model);
-    previewConfig = decision.previewConfig;
-    previewDecisionReason = decision.reason;
-  }
-
   const task = await createTask({
     projectId,
     taskType: "PLAN",
-    inputPayload: { model, previewConfig, autoDecideCounts: Boolean(options?.autoDecideCounts) },
+    inputPayload: {
+      requestedModel: options?.modelId ?? null,
+      previewConfig,
+      autoDecideCounts: Boolean(options?.autoDecideCounts),
+    },
   });
 
   try {
+    const { provider, adapter } = await getProviderAdapter();
+    const model =
+      options?.modelId ??
+      provider.models.find((item) => item.isDefaultPlanning)?.modelId ??
+      provider.models.find((item) => (item.capabilities as Record<string, boolean>).structured_output)?.modelId;
+
+    if (!model) {
+      throw new Error("当前没有可用的文案规划模型。");
+    }
+
+    if (options?.autoDecideCounts) {
+      const decision = await decidePreviewConfigWithAi(projectId, model);
+      previewConfig = decision.previewConfig;
+      previewDecisionReason = decision.reason;
+    }
+
     const prompt = buildSectionPlanningPrompt(
       project.analysis.normalizedResult as never,
       project.style,
@@ -701,8 +810,6 @@ export async function planSections(
       },
     });
 
-    await prisma.pageSection.deleteMany({ where: { projectId } });
-
     const rawSections = Array.isArray(result.parsed.sections) ? result.parsed.sections : [];
     const sections =
       rawSections.length > 0
@@ -713,112 +820,85 @@ export async function planSections(
           )
         : buildFallbackPlanFromTemplates(previewConfig.heroImageCount, previewConfig.detailSectionCount);
 
-    await prisma.pageSection.createMany({
-      data: sections.map((section) => ({
-        projectId,
-        sectionKey: section.sectionKey,
-        type: section.type as never,
-        title: section.title,
-        goal: section.goal,
-        copy: section.copy,
-        visualPrompt: section.visualPrompt,
-        order: section.order,
-        editableData: section.editableData as Prisma.InputJsonValue,
-      })),
+    const fallbackReason = rawSections.length === 0 ? "AI 未返回可用规划项，已自动切换为模板规划。" : "";
+    const saved = await savePlanResult({
+      projectId,
+      projectSnapshot: project.modelSnapshot,
+      sections,
+      previewConfig,
+      planningModelId: model,
+      previewConfigSource: options?.autoDecideCounts ? "ai" : "manual",
+      previewConfigReason: fallbackReason
+        ? mergePlanningReason(previewDecisionReason, fallbackReason)
+        : previewDecisionReason,
     });
 
-    await prisma.project.update({
-      where: { id: projectId },
-      data: {
-        status: "PLANNED",
-        modelSnapshot: {
-          ...(project.modelSnapshot as Record<string, unknown> | null),
-          planningModelId: model,
-          previewConfig,
-          previewConfigSource: options?.autoDecideCounts ? "ai" : "manual",
-          previewConfigReason: previewDecisionReason,
-        } as Prisma.InputJsonValue,
-      },
+    await completeTask(task.id, {
+      sections: serializeSectionsForTask(saved),
+      previewConfig,
+      previewDecisionReason,
+      ...(fallbackReason
+        ? {
+            fallbackMode: "template_plan",
+            fallbackReason,
+          }
+        : {}),
     });
 
-    const saved = await prisma.pageSection.findMany({
-      where: { projectId },
-      orderBy: { order: "asc" },
-    });
-    await completeTask(task.id, { sections: saved, previewConfig, previewDecisionReason });
     return {
       sections: saved,
       previewConfig,
-      previewDecisionReason,
+      previewDecisionReason: fallbackReason
+        ? mergePlanningReason(previewDecisionReason, fallbackReason)
+        : previewDecisionReason,
+      ...(fallbackReason
+        ? {
+            fallbackMode: "template_plan" as const,
+            fallbackReason,
+          }
+        : {}),
     };
   } catch (error) {
-    if (shouldFallbackToTemplatePlan(error)) {
-      try {
-        await prisma.pageSection.deleteMany({ where: { projectId } });
-        const fallbackSections = buildFallbackPlanFromTemplates(
-          previewConfig.heroImageCount,
-          previewConfig.detailSectionCount,
-        );
-        await prisma.pageSection.createMany({
-          data: fallbackSections.map((section) => ({
-            projectId,
-            sectionKey: section.sectionKey,
-            type: section.type as never,
-            title: section.title,
-            goal: section.goal,
-            copy: section.copy,
-            visualPrompt: section.visualPrompt,
-            order: section.order,
-            editableData: section.editableData as Prisma.InputJsonValue,
-          })),
-        });
+    const fallbackReason = describePlanningFallback(error);
+    const fallbackSections = buildFallbackPlanFromTemplates(
+      previewConfig.heroImageCount,
+      previewConfig.detailSectionCount,
+    );
 
-        await prisma.project.update({
-          where: { id: projectId },
-          data: {
-            status: "PLANNED",
-            modelSnapshot: {
-              ...(project.modelSnapshot as Record<string, unknown> | null),
-              planningModelId: model,
-              previewConfig,
-              previewConfigSource: options?.autoDecideCounts ? "ai" : "manual",
-              previewConfigReason: `${previewDecisionReason ? `${previewDecisionReason}；` : ""}AI 返回结构不完整，已自动切换为模板规划。`,
-            } as Prisma.InputJsonValue,
-          },
-        });
+    try {
+      const saved = await savePlanResult({
+        projectId,
+        projectSnapshot: project.modelSnapshot,
+        sections: fallbackSections,
+        previewConfig,
+        planningModelId: options?.modelId ?? null,
+        previewConfigSource: options?.autoDecideCounts ? "ai" : "manual",
+        previewConfigReason: mergePlanningReason(previewDecisionReason, fallbackReason),
+      });
 
-        const saved = await prisma.pageSection.findMany({
-          where: { projectId },
-          orderBy: { order: "asc" },
-        });
+      await completeTask(task.id, {
+        sections: serializeSectionsForTask(saved),
+        previewConfig,
+        previewDecisionReason,
+        fallbackMode: "template_plan",
+        fallbackReason,
+        planningError: error instanceof Error ? error.message : "Unknown planning error",
+      });
 
-        await completeTask(task.id, {
-          sections: saved,
-          previewConfig,
-          previewDecisionReason,
-          fallbackMode: "template_plan",
-        });
-
-        return {
-          sections: saved,
-          previewConfig,
-          previewDecisionReason,
-          fallbackMode: "template_plan" as const,
-        };
-      } catch {
-        await failTask(task.id, "AI 规划结果格式不完整，且模板规划回退失败。");
-        throw new Error("AI 规划结果格式不完整，请稍后重试。");
-      }
+      return {
+        sections: saved,
+        previewConfig,
+        previewDecisionReason: mergePlanningReason(previewDecisionReason, fallbackReason),
+        fallbackMode: "template_plan" as const,
+        fallbackReason,
+      };
+    } catch (fallbackError) {
+      await failTask(
+        task.id,
+        fallbackError instanceof Error ? fallbackError.message : "模板规划回退失败。",
+      );
+      throw new Error("页面规划失败，且模板规划回退未能写入。请稍后重试。");
     }
-
-    const message =
-      error instanceof Error
-        ? error.message.includes("timed out")
-          ? "页面规划请求超时，请稍后重试，或在 AI 配置里改用更快的规划模型。"
-          : error.message
-        : "页面规划失败";
-    await failTask(task.id, message);
-    throw new Error(message);
   }
 }
 

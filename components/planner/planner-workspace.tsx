@@ -221,6 +221,15 @@ export function PlannerWorkspace({ project }: PlannerWorkspaceProps) {
     }
   };
 
+  const ensureGenerationSettingsSaved = async () => {
+    const persistedSettings = getGenerationSettings(projectState);
+    if (persistedSettings.allowSvgFallback === generationSettings.allowSvgFallback) {
+      return;
+    }
+
+    await saveGenerationSettings({ silent: true, generationSettings });
+  };
+
   const autoPlan = async () => {
     setPlanning(true);
     setPlanningProgress({
@@ -252,9 +261,10 @@ export function PlannerWorkspace({ project }: PlannerWorkspaceProps) {
 
       setPlanningProgress({
         stage: "saving",
-        detail: payload.data?.fallbackMode === "template_plan"
-          ? "AI 返回结构不完整，已自动切换为模板规划并写入页面结构。"
-          : "规划结果已生成，正在写入头图与详情页结构…",
+        detail:
+          payload.data?.fallbackMode === "template_plan"
+            ? (payload.data?.fallbackReason ?? "AI 自动规划暂时不可用，已切换为模板规划并写入页面结构。")
+            : "规划结果已生成，正在写入头图与详情页结构…",
       });
 
       setSections(payload.data.sections ?? []);
@@ -264,7 +274,7 @@ export function PlannerWorkspace({ project }: PlannerWorkspaceProps) {
 
       toast.success(
         payload.data?.fallbackMode === "template_plan"
-          ? "AI 返回结构不完整，系统已自动切换为模板规划。"
+          ? "已生成可编辑模板规划；图片生成仍取决于真实图片端点或 SVG 兜底设置。"
           : "AI 已按分析页保存的输出配置完成头图与详情页规划",
       );
     } catch (error) {
@@ -397,6 +407,8 @@ export function PlannerWorkspace({ project }: PlannerWorkspaceProps) {
   const runSingleGeneration = async (section: any) => {
     setRunningSectionId(section.id);
     try {
+      await ensureGenerationSettingsSaved();
+
       const endpoint = section.imageUrl ? "regenerate" : "generate";
       const response = await fetch(`/api/projects/${project.id}/sections/${section.id}/${endpoint}`, {
         method: "POST",
@@ -425,6 +437,13 @@ export function PlannerWorkspace({ project }: PlannerWorkspaceProps) {
     const generationQueue = [...heroSections, ...detailSections];
     if (!generationQueue.length) {
       toast.error("当前没有可生成的模块，请先完成页面规划");
+      return;
+    }
+
+    try {
+      await ensureGenerationSettingsSaved();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "生成设置保存失败，请重试");
       return;
     }
 
@@ -510,6 +529,16 @@ export function PlannerWorkspace({ project }: PlannerWorkspaceProps) {
       router.refresh();
     } finally {
       setBulkGenerating(false);
+    }
+  };
+
+  const enterEditor = async () => {
+    try {
+      await ensureGenerationSettingsSaved();
+      router.push(`/projects/${project.id}/editor`);
+      router.refresh();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "生成设置保存失败，请重试");
     }
   };
 
@@ -682,12 +711,14 @@ export function PlannerWorkspace({ project }: PlannerWorkspaceProps) {
                 {bulkGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ImagePlus className="mr-2 h-4 w-4" />}
                 {bulkGenerating ? "正在一键生成..." : "一键生成全部模块图"}
               </Button>
-              <Link
-                href={`/projects/${project.id}/editor`}
-                className="inline-flex h-10 items-center justify-center rounded-xl border border-slate-200 bg-white px-4 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 hover:text-slate-900 dark:border-white/10 dark:bg-white/[0.06] dark:text-slate-100 dark:hover:bg-white/[0.1] dark:hover:text-white"
+              <Button
+                type="button"
+                variant="outline"
+                onClick={enterEditor}
+                disabled={savingConfig || bulkGenerating}
               >
                 直接进入预览与编辑
-              </Link>
+              </Button>
             </div>
           </div>
         </CardContent>

@@ -116,7 +116,11 @@ export function AnalysisWorkspace({
       setAnalysis(payload.data.normalizedResult);
       await refreshProject();
       if (!options?.silentSuccess) {
-        toast.success("AI 商品分析完成");
+        if (payload.data.rawResult?.mode === "local_fallback") {
+          toast.warning(payload.data.rawResult?.reason ?? "已生成本地分析草稿，请确认字段后继续。");
+        } else {
+          toast.success("AI 商品分析完成");
+        }
       }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "商品分析失败");

@@ -144,10 +144,10 @@ export async function buildImageArchive(projectId: string) {
     taskType: "EXPORT",
     inputPayload: { type: "detail-page-images" },
   });
+  const tempZipPath = path.join(process.cwd(), `tmp-export-${projectId}-${Date.now()}.zip`);
 
   try {
     const archive = archiver("zip", { zlib: { level: 9 } });
-    const tempZipPath = path.join(process.cwd(), `tmp-export-${projectId}-${Date.now()}.zip`);
     const output = fs.createWriteStream(tempZipPath);
     archive.pipe(output);
 
@@ -220,6 +220,7 @@ export async function buildImageArchive(projectId: string) {
 
     return zipBuffer;
   } catch (error) {
+    await fsp.rm(tempZipPath, { force: true }).catch(() => null);
     await failTask(task.id, error instanceof Error ? error.message : "Export failed");
     throw error;
   }

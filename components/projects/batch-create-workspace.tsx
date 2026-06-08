@@ -94,7 +94,11 @@ export function BatchCreateWorkspace() {
         throw new Error(planPayload.error?.message ?? "详情页规划失败");
       }
 
-      return projectId;
+      return {
+        projectId,
+        analysisFallback: analyzePayload.data?.rawResult?.mode === "local_fallback",
+        planningFallback: planPayload.data?.fallbackMode === "template_plan",
+      };
     } catch (error) {
       if (projectId && !uploadCompleted) {
         await fetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => null);
@@ -124,12 +128,15 @@ export function BatchCreateWorkspace() {
         const fileItem = batchFiles[index];
         updateBatchStatus(index, { state: "running", message: "正在创建、分析并规划详情页" });
         try {
-          const projectId = await createAnalyzedPlannedProject(fileItem, index);
+          const result = await createAnalyzedPlannedProject(fileItem, index);
           successCount += 1;
           updateBatchStatus(index, {
             state: "done",
-            message: "已完成分析与详情页规划",
-            projectId,
+            message:
+              result.analysisFallback || result.planningFallback
+                ? "已生成可编辑草稿与详情页规划"
+                : "已完成分析与详情页规划",
+            projectId: result.projectId,
           });
         } catch (error) {
           updateBatchStatus(index, {

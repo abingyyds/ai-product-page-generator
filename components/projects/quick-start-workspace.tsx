@@ -103,7 +103,11 @@ export function QuickStartWorkspace() {
         return;
       }
 
-      toast.success("主图上传完成，AI 已自动完成首轮分析。");
+      if (analyzePayload.data?.rawResult?.mode === "local_fallback") {
+        toast.warning("主图已上传，已生成本地分析草稿，请在分析页确认字段。");
+      } else {
+        toast.success("主图上传完成，AI 已自动完成首轮分析。");
+      }
       router.push(`/projects/${projectId}/analysis`);
     } catch (error) {
       if (projectId && !uploadCompleted) {

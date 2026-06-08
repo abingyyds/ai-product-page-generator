@@ -97,7 +97,11 @@ function resolveOpenAiSize(input: { aspectRatio?: "1:1" | "3:4" | "9:16"; size?:
     return "1024x1024";
   }
 
-  if (input.aspectRatio === "3:4" || input.aspectRatio === "9:16") {
+  if (input.aspectRatio === "9:16") {
+    return "1024x1792";
+  }
+
+  if (input.aspectRatio === "3:4") {
     return "1024x1536";
   }
 

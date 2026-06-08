@@ -153,6 +153,75 @@ function normalizeAnalysisProviderError(error: unknown): never {
   throw error instanceof Error ? error : new Error(detail);
 }
 
+function describeAnalysisFallback(error: unknown) {
+  const detail = error instanceof Error ? error.message : "Unknown analysis error";
+
+  if (/No active provider config found/i.test(detail)) {
+    return "当前没有可用的 Provider 配置，已生成可编辑的本地分析草稿。";
+  }
+
+  if (/No analysis model available|当前没有可用/i.test(detail)) {
+    return "当前没有可用的商品分析模型，已生成可编辑的本地分析草稿。";
+  }
+
+  if (/timed out|aborterror|network error|fetch failed|请求超时|网络异常/i.test(detail)) {
+    return "AI 商品分析请求超时或网络异常，已生成可编辑的本地分析草稿。";
+  }
+
+  if (/invalid token|unauthorized|forbidden|鉴权失败|401|403/i.test(detail)) {
+    return "当前 Provider 鉴权失败，已生成可编辑的本地分析草稿。";
+  }
+
+  if (/429|rate limit|限流/i.test(detail)) {
+    return "当前 Provider 触发限流，已生成可编辑的本地分析草稿。";
+  }
+
+  if (/monthly spending limit|spending limit|billing|quota|insufficient_quota|额度已用尽|月度限额/i.test(detail)) {
+    return "当前 Provider 额度不可用，已生成可编辑的本地分析草稿。";
+  }
+
+  return `AI 商品分析暂时不可用，已生成可编辑的本地分析草稿。原因：${detail}`;
+}
+
+function buildLocalAnalysisDraft(project: {
+  name: string;
+  platform: string;
+  style: string;
+  description: string | null;
+  assets: Array<{ fileName: string; type: string }>;
+}) {
+  const assetNames = project.assets.map((asset) => asset.fileName.replace(/\.[^.]+$/, "")).filter(Boolean);
+  const productName = project.name || assetNames[0] || "未命名商品";
+  const notes = project.description?.trim();
+
+  return productAnalysisOutputSchema.parse({
+    productName,
+    category: "待确认品类",
+    subcategory: "待确认子类目",
+    material: "待补充材质",
+    color: "以主图为准",
+    styleTags: ["通用电商", "清晰展示", "转化导向"],
+    targetAudience: ["关注商品外观与实用价值的用户", "需要快速判断购买理由的用户"],
+    usageScenarios: ["日常使用场景", "电商详情页展示", "移动端浏览"],
+    coreSellingPoints: [
+      notes || "商品主体清晰，适合围绕外观、功能和使用场景展开详情页表达",
+      "可结合主图补充卖点、细节、规格和信任背书",
+      "适合先生成基础规划，再在分析页手动校准商品信息",
+    ],
+    differentiationPoints: ["结合主图突出外观记忆点", "通过详情页模块补充用户决策信息"],
+    userConcerns: ["商品信息仍需人工确认", "材质、尺寸、功效等关键参数需要补充"],
+    recommendedFocusPoints: ["先确认商品名称、品类、材质和核心卖点", "优先规划头图、卖点速览、细节说明、场景展示和规格信息"],
+    suggestedSectionPlan: [
+      { type: "hero", title: "主视觉头图", goal: "先用清晰商品主体建立第一眼认知" },
+      { type: "selling_points", title: "核心卖点速览", goal: "把主要购买理由在一屏内讲清楚" },
+      { type: "detail_closeup", title: "细节特写", goal: "补充材质、结构和做工信任感" },
+      { type: "scenario", title: "场景使用展示", goal: "让用户代入真实使用场景" },
+      { type: "specs", title: "规格信息说明", goal: "整理尺寸、参数和适配信息" },
+      { type: "summary", title: "购买理由总结", goal: "完成最后转化收口" },
+    ],
+  }) as Prisma.JsonObject;
+}
+
 export async function analyzeProject(projectId: string, preferredModelId?: string | null) {
   await requireProjectAccess(projectId);
   const project = await prisma.project.findUnique({
@@ -162,13 +231,6 @@ export async function analyzeProject(projectId: string, preferredModelId?: strin
 
   if (!project) {
     throw new Error("Project not found.");
-  }
-
-  const { provider, adapter } = await getProviderAdapter();
-  const model = pickAnalysisModel({ ...provider, models: provider.models }, preferredModelId);
-
-  if (!model) {
-    throw new Error("No analysis model available.");
   }
 
   const existingTask = await findRecentRunningTask({
@@ -183,10 +245,17 @@ export async function analyzeProject(projectId: string, preferredModelId?: strin
   const task = await createTask({
     projectId,
     taskType: "ANALYZE",
-    inputPayload: { model },
+    inputPayload: { requestedModel: preferredModelId ?? null },
   });
 
   try {
+    const { provider, adapter } = await getProviderAdapter();
+    const model = pickAnalysisModel({ ...provider, models: provider.models }, preferredModelId);
+
+    if (!model) {
+      throw new Error("No analysis model available.");
+    }
+
     const imageUrls = await Promise.all(project.assets.slice(0, 6).map((asset) => assetToDataUrl(asset)));
     const prompt = buildProductAnalysisPrompt(project.assets);
 
@@ -285,6 +354,7 @@ export async function analyzeProject(projectId: string, preferredModelId?: strin
       data: {
         status: "ANALYZED",
         modelSnapshot: {
+          ...(project.modelSnapshot as Record<string, unknown> | null),
           analysisModelId: model,
           providerConfigId: provider.id,
         },
@@ -294,8 +364,47 @@ export async function analyzeProject(projectId: string, preferredModelId?: strin
     await completeTask(task.id, saved.normalizedResult);
     return saved;
   } catch (error) {
-    await failTask(task.id, error instanceof Error ? error.message : "Analysis failed");
-    throw error;
+    const fallbackReason = describeAnalysisFallback(error);
+    const parsedResult = buildLocalAnalysisDraft(project);
+    const saved = await prisma.productAnalysis.upsert({
+      where: { projectId },
+      update: {
+        rawResult: {
+          mode: "local_fallback",
+          reason: fallbackReason,
+          error: error instanceof Error ? error.message : "Unknown analysis error",
+        },
+        normalizedResult: parsedResult,
+      },
+      create: {
+        projectId,
+        rawResult: {
+          mode: "local_fallback",
+          reason: fallbackReason,
+          error: error instanceof Error ? error.message : "Unknown analysis error",
+        },
+        normalizedResult: parsedResult,
+      },
+    });
+
+    await prisma.project.update({
+      where: { id: projectId },
+      data: {
+        status: "ANALYZED",
+        modelSnapshot: {
+          ...(project.modelSnapshot as Record<string, unknown> | null),
+          analysisModelId: preferredModelId ?? null,
+          analysisFallbackReason: fallbackReason,
+        },
+      },
+    });
+
+    await completeTask(task.id, {
+      normalizedResult: saved.normalizedResult,
+      fallbackMode: "local_analysis",
+      fallbackReason,
+    });
+    return saved;
   }
 }
 
