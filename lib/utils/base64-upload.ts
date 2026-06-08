@@ -23,3 +23,12 @@ export async function fileToBase64Payload(file: File): Promise<Base64UploadPaylo
     base64Data: stripDataUrlPrefix(dataUrl),
   };
 }
+
+export function fileToAssetUploadFormData(type: string, file: File) {
+  const formData = new FormData();
+  formData.set("type", type);
+  formData.set("file", file, file.name);
+  formData.set("fileName", file.name);
+  formData.set("mimeType", file.type || "application/octet-stream");
+  return formData;
+}

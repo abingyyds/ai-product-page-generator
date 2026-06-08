@@ -3,7 +3,9 @@ import { NextRequest } from "next/server";
 import { requireCurrentUser } from "@/lib/auth/session";
 import { prisma } from "@/lib/db/prisma";
 import { readStorageFile } from "@/lib/storage/asset-manager";
-import { handleRouteError } from "@/lib/utils/route";
+import { fail, handleRouteError } from "@/lib/utils/route";
+
+export const runtime = "nodejs";
 
 function getContentType(pathname: string) {
   const normalized = pathname.toLowerCase();
@@ -38,7 +40,28 @@ export async function GET(
       throw new Error("Asset not found.");
     }
 
-    const buffer = await readStorageFile(relativePath);
+    const buffer = await readStorageFile(relativePath).catch((error: unknown) => {
+      if (
+        typeof error === "object" &&
+        error !== null &&
+        "code" in error &&
+        (error as { code?: string }).code === "ENOENT"
+      ) {
+        return null;
+      }
+
+      throw error;
+    });
+
+    if (!buffer) {
+      return fail(
+        "ASSET_FILE_MISSING",
+        "图片文件不在存储目录中，请确认 Railway Volume 已挂载在 /app/data。",
+        { path: relativePath },
+        404,
+      );
+    }
+
     const contentType = getContentType(relativePath);
 
     return new Response(buffer, {

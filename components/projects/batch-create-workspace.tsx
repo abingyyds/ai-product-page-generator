@@ -7,7 +7,7 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { fileToBase64Payload } from "@/lib/utils/base64-upload";
+import { fileToAssetUploadFormData } from "@/lib/utils/base64-upload";
 
 function buildBatchProjectName(file: File, index: number) {
   const baseName = file.name.replace(/\.[^.]+$/, "").trim() || `批量商品-${index + 1}`;
@@ -43,58 +43,64 @@ export function BatchCreateWorkspace() {
   }
 
   async function createAnalyzedPlannedProject(fileItem: File, index: number) {
-    const createResponse = await fetch("/api/projects", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        name: buildBatchProjectName(fileItem, index),
-        platform: "general_ecommerce",
-        style: "generic_clean",
-        description: "由批量创建自动生成",
-      }),
-    });
-    const createdPayload = await createResponse.json();
-    if (!createdPayload.success) {
-      throw new Error(createdPayload.error?.message ?? "创建项目失败");
+    let projectId: string | null = null;
+    let uploadCompleted = false;
+
+    try {
+      const createResponse = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: buildBatchProjectName(fileItem, index),
+          platform: "general_ecommerce",
+          style: "generic_clean",
+          description: "由批量创建自动生成",
+        }),
+      });
+      const createdPayload = await createResponse.json();
+      if (!createdPayload.success) {
+        throw new Error(createdPayload.error?.message ?? "创建项目失败");
+      }
+
+      projectId = createdPayload.data.id as string;
+
+      const uploadResponse = await fetch(`/api/projects/${projectId}/assets/upload`, {
+        method: "POST",
+        body: fileToAssetUploadFormData("MAIN", fileItem),
+      });
+      const uploadPayload = await uploadResponse.json();
+      if (!uploadPayload.success) {
+        throw new Error(uploadPayload.error?.message ?? "主商品图上传失败");
+      }
+      uploadCompleted = true;
+
+      const analyzeResponse = await fetch(`/api/projects/${projectId}/analyze`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: "{}",
+      });
+      const analyzePayload = await analyzeResponse.json();
+      if (!analyzePayload.success) {
+        throw new Error(analyzePayload.error?.message ?? "商品分析失败");
+      }
+
+      const planResponse = await fetch(`/api/projects/${projectId}/plan-sections`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ autoDecideCounts: true }),
+      });
+      const planPayload = await planResponse.json();
+      if (!planPayload.success) {
+        throw new Error(planPayload.error?.message ?? "详情页规划失败");
+      }
+
+      return projectId;
+    } catch (error) {
+      if (projectId && !uploadCompleted) {
+        await fetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => null);
+      }
+      throw error;
     }
-
-    const projectId = createdPayload.data.id as string;
-    const base64Payload = await fileToBase64Payload(fileItem);
-
-    const uploadResponse = await fetch(`/api/projects/${projectId}/assets/upload`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        type: "MAIN",
-        ...base64Payload,
-      }),
-    });
-    const uploadPayload = await uploadResponse.json();
-    if (!uploadPayload.success) {
-      throw new Error(uploadPayload.error?.message ?? "主商品图上传失败");
-    }
-
-    const analyzeResponse = await fetch(`/api/projects/${projectId}/analyze`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: "{}",
-    });
-    const analyzePayload = await analyzeResponse.json();
-    if (!analyzePayload.success) {
-      throw new Error(analyzePayload.error?.message ?? "商品分析失败");
-    }
-
-    const planResponse = await fetch(`/api/projects/${projectId}/plan-sections`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ autoDecideCounts: true }),
-    });
-    const planPayload = await planResponse.json();
-    if (!planPayload.success) {
-      throw new Error(planPayload.error?.message ?? "详情页规划失败");
-    }
-
-    return projectId;
   }
 
   async function handleBatchStart() {

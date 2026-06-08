@@ -13,7 +13,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { fileToBase64Payload } from "@/lib/utils/base64-upload";
+import { fileToAssetUploadFormData } from "@/lib/utils/base64-upload";
 import { assetTypeLabels, platformLabels, platformOptions, styleLabels, styleOptions } from "@/types/domain";
 import { projectCreateSchema } from "@/lib/validations/project";
 
@@ -142,6 +142,9 @@ export function ProjectCreator() {
     }
 
     setSubmitting(true);
+    let projectId: string | null = null;
+    let uploadCompleted = false;
+
     try {
       const createResponse = await fetch("/api/projects", {
         method: "POST",
@@ -151,18 +154,13 @@ export function ProjectCreator() {
       const createdPayload = await createResponse.json();
       if (!createdPayload.success) throw new Error(createdPayload.error?.message ?? "创建项目失败");
 
-      const projectId = createdPayload.data.id as string;
+      projectId = createdPayload.data.id as string;
 
       for (const [type, files] of Object.entries(uploads) as Array<[UploadBucketKey, File[]]>) {
         for (const file of files) {
-          const base64Payload = await fileToBase64Payload(file);
           const uploadResponse = await fetch(`/api/projects/${projectId}/assets/upload`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              type,
-              ...base64Payload,
-            }),
+            body: fileToAssetUploadFormData(type, file),
           });
           const uploadPayload = await uploadResponse.json();
           if (!uploadPayload.success) {
@@ -170,10 +168,14 @@ export function ProjectCreator() {
           }
         }
       }
+      uploadCompleted = true;
 
       toast.success("项目已创建");
       router.push(`/projects/${projectId}/analysis`);
     } catch (error) {
+      if (projectId && !uploadCompleted) {
+        await fetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => null);
+      }
       toast.error(error instanceof Error ? error.message : "创建项目失败");
     } finally {
       setSubmitting(false);

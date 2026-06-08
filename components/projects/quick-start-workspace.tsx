@@ -7,7 +7,7 @@ import { useRouter } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { fileToBase64Payload } from "@/lib/utils/base64-upload";
+import { fileToAssetUploadFormData } from "@/lib/utils/base64-upload";
 
 function buildDraftProjectName() {
   const now = new Date();
@@ -45,6 +45,9 @@ export function QuickStartWorkspace() {
 
     setSubmitting(true);
 
+    let projectId: string | null = null;
+    let uploadCompleted = false;
+
     try {
       const createResponse = await fetch("/api/projects", {
         method: "POST",
@@ -61,21 +64,17 @@ export function QuickStartWorkspace() {
         throw new Error(createdPayload.error?.message ?? "创建项目失败");
       }
 
-      const projectId = createdPayload.data.id as string;
-      const base64Payload = await fileToBase64Payload(file);
+      projectId = createdPayload.data.id as string;
 
       const uploadResponse = await fetch(`/api/projects/${projectId}/assets/upload`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "MAIN",
-          ...base64Payload,
-        }),
+        body: fileToAssetUploadFormData("MAIN", file),
       });
       const uploadPayload = await uploadResponse.json();
       if (!uploadPayload.success) {
         throw new Error(uploadPayload.error?.message ?? "主商品图上传失败");
       }
+      uploadCompleted = true;
 
       const analyzeResponse = await fetch(`/api/projects/${projectId}/analyze`, {
         method: "POST",
@@ -107,6 +106,9 @@ export function QuickStartWorkspace() {
       toast.success("主图上传完成，AI 已自动完成首轮分析。");
       router.push(`/projects/${projectId}/analysis`);
     } catch (error) {
+      if (projectId && !uploadCompleted) {
+        await fetch(`/api/projects/${projectId}`, { method: "DELETE" }).catch(() => null);
+      }
       toast.error(error instanceof Error ? error.message : "快速开始失败");
     } finally {
       setSubmitting(false);
