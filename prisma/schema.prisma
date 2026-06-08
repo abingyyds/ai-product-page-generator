@@ -61,8 +61,51 @@ enum TaskStatus {
   FAILED
 }
 
+model AppUser {
+  id                String           @id @default(cuid())
+  externalProvider  String?
+  externalUserId    String?
+  username          String?
+  email             String?
+  displayName       String?
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  projects          Project[]
+  providerConfigs   ProviderConfig[]
+  gatewayAccounts   GatewayAccount[]
+
+  @@unique([externalProvider, externalUserId])
+  @@index([username])
+  @@index([email])
+}
+
+model GatewayAccount {
+  id                     String   @id @default(cuid())
+  userId                 String
+  user                   AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider               String
+  baseUrl                String
+  externalUserId         String?
+  username               String?
+  email                  String?
+  displayName            String?
+  sessionCookieEncrypted String?
+  accessTokenEncrypted   String?
+  refreshTokenEncrypted  String?
+  apiKeyEncrypted        String?
+  apiKeyId               String?
+  modelsSnapshot         Json?
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@unique([userId, provider, baseUrl])
+  @@index([userId, updatedAt])
+}
+
 model Project {
   id            String           @id @default(cuid())
+  userId        String?
+  user          AppUser?         @relation(fields: [userId], references: [id], onDelete: Cascade)
   name          String
   status        ProjectStatus    @default(DRAFT)
   platform      String
@@ -75,10 +118,14 @@ model Project {
   analysis      ProductAnalysis?
   sections      PageSection[]
   tasks         GenerationTask[]
+
+  @@index([userId, updatedAt])
 }
 
 model ProviderConfig {
   id              String         @id @default(cuid())
+  userId          String?
+  user            AppUser?       @relation(fields: [userId], references: [id], onDelete: Cascade)
   name            String
   baseUrl         String
   apiKeyEncrypted String
@@ -86,6 +133,8 @@ model ProviderConfig {
   createdAt       DateTime       @default(now())
   updatedAt       DateTime       @updatedAt
   models          ModelProfile[]
+
+  @@index([userId, updatedAt])
 }
 
 model ModelProfile {

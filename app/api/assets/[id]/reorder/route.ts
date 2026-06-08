@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { z } from "zod";
 
+import { requireAssetAccess } from "@/lib/auth/authorization";
 import { prisma } from "@/lib/db/prisma";
 import { handleRouteError, ok } from "@/lib/utils/route";
 
@@ -10,6 +11,7 @@ const reorderSchema = z.object({
 
 export async function PATCH(request: NextRequest, context: { params: { id: string } }) {
   try {
+    await requireAssetAccess(context.params.id);
     const input = reorderSchema.parse(await request.json());
     const asset = await prisma.productAsset.update({
       where: { id: context.params.id },

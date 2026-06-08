@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 
+import { requireProjectAccess } from "@/lib/auth/authorization";
 import { prisma } from "@/lib/db/prisma";
 
 export async function createTask(input: {
@@ -8,6 +9,7 @@ export async function createTask(input: {
   taskType: "ANALYZE" | "PLAN" | "GENERATE" | "REGENERATE" | "EXPORT";
   inputPayload?: unknown;
 }) {
+  await requireProjectAccess(input.projectId);
   return prisma.generationTask.create({
     data: {
       projectId: input.projectId,
@@ -26,6 +28,7 @@ export async function findRecentRunningTask(input: {
   sectionId?: string | null;
   maxAgeMinutes?: number;
 }) {
+  await requireProjectAccess(input.projectId);
   const maxAgeMinutes = input.maxAgeMinutes ?? 10;
   const startedAfter = new Date(Date.now() - maxAgeMinutes * 60 * 1000);
 

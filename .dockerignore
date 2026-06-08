@@ -1,0 +1,13 @@
+.DS_Store
+.env
+.env.*
+!.env.example
+.git
+.next
+dist-desktop
+node_modules
+prisma/dev.db
+release
+storage
+*.log
+*.tsbuildinfo

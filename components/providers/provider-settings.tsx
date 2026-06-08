@@ -260,6 +260,10 @@ function getModelsForType(models: GenericModelRecord[], typeKey: ModelTypeKey) {
   });
 }
 
+function isManagedGatewayProvider(provider: ProviderRecord | null | undefined) {
+  return provider?.name === "智能网关" && provider.baseUrl === "自动配置";
+}
+
 function getTypeDefaultValue(defaults: DefaultAssignments, typeKey: ModelTypeKey) {
   if (typeKey === "text") {
     return defaults.planningModelId ?? "";
@@ -432,6 +436,7 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
     () => providers.find((item) => item.id === selectedProviderId) ?? activeProvider,
     [providers, selectedProviderId, activeProvider],
   );
+  const selectedProviderIsManaged = isManagedGatewayProvider(selectedProvider);
   const [models, setModels] = useState<Array<GenericModelRecord>>(selectedProvider?.models ?? []);
   const [defaults, setDefaults] = useState<DefaultAssignments>(buildDefaults(selectedProvider ?? null));
 
@@ -600,7 +605,7 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
                     {providers.length === 0 ? <option value="">暂无已保存服务</option> : null}
                     {providers.map((provider) => (
                       <option key={provider.id} value={provider.id}>
-                        {provider.name} / {provider.baseUrl}
+                        {provider.name} / {isManagedGatewayProvider(provider) ? "自动配置" : provider.baseUrl}
                       </option>
                     ))}
                   </select>
@@ -636,6 +641,11 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
                 <p className="mt-2 text-sm text-muted-foreground">{selectedProvider.baseUrl}</p>
                 <p className="mt-1 text-xs text-muted-foreground">Key：{selectedProvider.maskedApiKey || "未显示"}</p>
                 <p className="mt-1 text-xs text-muted-foreground">最近更新：{formatTimeLabel(selectedProvider.updatedAt)}</p>
+                {selectedProviderIsManaged ? (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    此服务由当前账号自动维护，模型列表会随账号权限同步。
+                  </p>
+                ) : null}
               </div>
             ) : (
               <div className="rounded-2xl border border-dashed border-border p-4 text-sm text-muted-foreground">
@@ -656,6 +666,7 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
                 data-lpignore="true"
                 data-form-type="other"
                 placeholder="例如：OpenRouter / Gemini Gateway / 自建兼容网关"
+                disabled={selectedProviderIsManaged}
                 {...form.register("name")}
               />
             </div>
@@ -672,6 +683,7 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
                 data-lpignore="true"
                 data-form-type="other"
                 placeholder="https://your-provider.example/v1"
+                disabled={selectedProviderIsManaged}
                 {...form.register("baseUrl")}
               />
             </div>
@@ -688,6 +700,7 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
                 data-lpignore="true"
                 data-form-type="other"
                 placeholder="可留空；系统会自动复用当前服务已保存的 API Key"
+                disabled={selectedProviderIsManaged}
                 {...form.register("apiKey")}
               />
               <p className="text-xs text-muted-foreground">
@@ -697,15 +710,15 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
           </form>
 
           <div className="flex flex-wrap gap-3">
-            <Button type="button" variant="outline" onClick={handleTest} disabled={loading !== null}>
+            <Button type="button" variant="outline" onClick={handleTest} disabled={loading !== null || selectedProviderIsManaged}>
               {loading === "test" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <PlugZap className="mr-2 h-4 w-4" />}
               测试连接
             </Button>
-            <Button type="button" variant="secondary" onClick={handleDiscover} disabled={loading !== null}>
+            <Button type="button" variant="secondary" onClick={handleDiscover} disabled={loading !== null || selectedProviderIsManaged}>
               {loading === "discover" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Search className="mr-2 h-4 w-4" />}
               发现模型并识别能力
             </Button>
-            <Button type="button" onClick={() => saveProvider(true)} disabled={loading !== null || models.length === 0}>
+            <Button type="button" onClick={() => saveProvider(true)} disabled={loading !== null || models.length === 0 || selectedProviderIsManaged}>
               {loading === "save" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
               {selectedProvider ? "覆盖保存当前服务" : "保存当前配置"}
             </Button>
@@ -713,7 +726,7 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
               type="button"
               variant="outline"
               onClick={() => saveProvider(false)}
-              disabled={loading !== null || models.length === 0}
+              disabled={loading !== null || models.length === 0 || selectedProviderIsManaged}
             >
               {loading === "saveAsNew" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CopyPlus className="mr-2 h-4 w-4" />}
               另存为新服务

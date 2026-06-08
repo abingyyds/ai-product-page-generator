@@ -1,3 +1,7 @@
+import { NextRequest } from "next/server";
+
+import { requireCurrentUser } from "@/lib/auth/session";
+import { prisma } from "@/lib/db/prisma";
 import { readStorageFile } from "@/lib/storage/asset-manager";
 import { handleRouteError } from "@/lib/utils/route";
 
@@ -14,11 +18,26 @@ function getContentType(pathname: string) {
 }
 
 export async function GET(
-  _request: Request,
+  request: NextRequest,
   context: { params: { path: string[] } },
 ) {
   try {
+    const user = await requireCurrentUser(request);
     const relativePath = context.params.path.join("/");
+    const asset = await prisma.productAsset.findFirst({
+      where: {
+        filePath: relativePath,
+        project: {
+          userId: user.id,
+        },
+      },
+      select: { id: true },
+    });
+
+    if (!asset) {
+      throw new Error("Asset not found.");
+    }
+
     const buffer = await readStorageFile(relativePath);
     const contentType = getContentType(relativePath);
 

@@ -1,9 +1,11 @@
 import Link from "next/link";
-import { BookOpenText, FolderKanban, GalleryVerticalEnd, History, Images, Settings2 } from "lucide-react";
+import { BookOpenText, FolderKanban, GalleryVerticalEnd, History, Images, Settings2, UserCircle2 } from "lucide-react";
 
+import { LogoutButton } from "@/components/auth/logout-button";
 import { ApiUsageIndicator } from "@/components/layout/api-usage-indicator";
 import { FloatingThemeToggle } from "@/components/layout/theme-toggle";
 import { buttonVariants } from "@/components/ui/button";
+import { getCurrentUser } from "@/lib/auth/session";
 import { cn } from "@/lib/utils";
 
 const navItems = [
@@ -14,7 +16,13 @@ const navItems = [
   { href: "/projects/new", label: "高级创建", icon: GalleryVerticalEnd },
 ];
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+export async function AppShell({ children }: { children: React.ReactNode }) {
+  const user = await getCurrentUser();
+
+  if (!user) {
+    return <>{children}</>;
+  }
+
   return (
     <div className="min-h-screen text-slate-900 dark:text-slate-100">
       <div className="fixed bottom-4 left-4 z-[60]">
@@ -94,6 +102,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         <main className="min-w-0 rounded-[2rem] border border-white/80 bg-white/74 p-5 shadow-soft backdrop-blur-2xl dark:border-white/10 dark:bg-[#0f0f10]/82 dark:shadow-[0_24px_60px_-38px_rgba(0,0,0,0.78)] md:ml-[19.5rem] md:p-8">
           <div className="mb-6 flex flex-wrap items-center justify-end gap-3">
+            <div className="flex h-10 items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 text-sm shadow-sm dark:border-white/10 dark:bg-black/30">
+              <UserCircle2 className="h-4 w-4 text-slate-500 dark:text-slate-300" />
+              <span className="max-w-[180px] truncate font-medium">{user.name ?? "当前账号"}</span>
+            </div>
             <Link
               href="/monitor/usage"
               className={cn(
@@ -108,6 +120,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <Settings2 className="mr-2 h-4 w-4" />
               AI 配置
             </Link>
+            <LogoutButton />
           </div>
           {children}
         </main>

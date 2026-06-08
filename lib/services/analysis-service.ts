@@ -3,6 +3,7 @@ import { ZodError } from "zod";
 
 import { buildProductAnalysisPrompt, buildProductAnalysisRepairPrompt } from "@/lib/ai/prompts";
 import { productAnalysisOutputSchema } from "@/lib/ai/schemas/product-analysis";
+import { requireProjectAccess } from "@/lib/auth/authorization";
 import { prisma } from "@/lib/db/prisma";
 import { getProviderAdapter } from "@/lib/services/provider-service";
 import { completeTask, createTask, failTask, findRecentRunningTask } from "@/lib/services/task-service";
@@ -153,6 +154,7 @@ function normalizeAnalysisProviderError(error: unknown): never {
 }
 
 export async function analyzeProject(projectId: string, preferredModelId?: string | null) {
+  await requireProjectAccess(projectId);
   const project = await prisma.project.findUnique({
     where: { id: projectId },
     include: { assets: { orderBy: { sortOrder: "asc" } } },
@@ -298,6 +300,7 @@ export async function analyzeProject(projectId: string, preferredModelId?: strin
 }
 
 export async function updateAnalysis(projectId: string, normalizedResult: unknown) {
+  await requireProjectAccess(projectId);
   const jsonValue = normalizedResult as Prisma.InputJsonValue;
   return prisma.productAnalysis.upsert({
     where: { projectId },

@@ -1,6 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 
+import { requireCurrentUser } from "@/lib/auth/session";
 import { prisma } from "@/lib/db/prisma";
 import { assetPublicUrl, deleteAssetRecord } from "@/lib/storage/asset-manager";
 import { env } from "@/lib/utils/env";
@@ -96,7 +97,9 @@ async function pruneProjectToPreviewConfig(projectId: string, snapshot: unknown)
 }
 
 export async function listProjects() {
+  const user = await requireCurrentUser();
   const projects = await prisma.project.findMany({
+    where: { userId: user.id },
     orderBy: { updatedAt: "desc" },
     include: {
       assets: {
@@ -120,14 +123,19 @@ export async function createProject(input: {
   style: string;
   description?: string | null;
 }) {
+  const user = await requireCurrentUser();
   return prisma.project.create({
-    data: input,
+    data: {
+      ...input,
+      userId: user.id,
+    },
   });
 }
 
 export async function getProjectDetail(projectId: string) {
+  const user = await requireCurrentUser();
   const project = await prisma.project.findUnique({
-    where: { id: projectId },
+    where: { id: projectId, userId: user.id },
     include: {
       assets: { orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }] },
       analysis: true,
@@ -172,8 +180,18 @@ export async function getProjectDetail(projectId: string) {
 }
 
 export async function updateProject(projectId: string, input: Record<string, unknown>) {
+  const user = await requireCurrentUser();
+  const existing = await prisma.project.findUnique({
+    where: { id: projectId, userId: user.id },
+    select: { id: true },
+  });
+
+  if (!existing) {
+    return null;
+  }
+
   await prisma.project.update({
-    where: { id: projectId },
+    where: { id: projectId, userId: user.id },
     data: input,
   });
 
@@ -185,8 +203,9 @@ export async function updateProject(projectId: string, input: Record<string, unk
 }
 
 export async function deleteProject(projectId: string) {
+  const user = await requireCurrentUser();
   const project = await prisma.project.findUnique({
-    where: { id: projectId },
+    where: { id: projectId, userId: user.id },
   });
 
   if (!project) {
@@ -194,7 +213,7 @@ export async function deleteProject(projectId: string) {
   }
 
   await prisma.project.delete({
-    where: { id: projectId },
+    where: { id: projectId, userId: user.id },
   });
 
   const storageRoot = path.resolve(process.cwd(), env.STORAGE_ROOT);

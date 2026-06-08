@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db/prisma";
 import { OpenAICompatibleAdapter } from "@/lib/ai/adapters/openai-compatible";
 import { normalizeDetectedModels } from "@/lib/ai/capability-detector";
 import { recommendDefaultModels } from "@/lib/ai/model-matcher";
+import { requireCurrentUser } from "@/lib/auth/session";
 import { decryptSecret, encryptSecret } from "@/lib/utils/crypto";
 import type {
   CapabilityMap,
@@ -92,6 +93,25 @@ function maskApiKey(apiKey: string) {
     return `${trimmed.slice(0, 3)}***${trimmed.slice(-2)}`;
   }
   return `${trimmed.slice(0, 6)}***${trimmed.slice(-4)}`;
+}
+
+function isManagedGatewayProvider(provider: { name?: string | null }) {
+  return provider.name === "智能网关";
+}
+
+function serializeProviderForClient<T extends { name: string; baseUrl: string; apiKey: string; maskedApiKey: string }>(
+  provider: T,
+) {
+  if (!isManagedGatewayProvider(provider)) {
+    return provider;
+  }
+
+  return {
+    ...provider,
+    baseUrl: "自动配置",
+    apiKey: "",
+    maskedApiKey: "自动托管",
+  };
 }
 
 function readEndpointSupport(capabilities: Record<string, unknown> | null | undefined) {
@@ -241,6 +261,7 @@ export async function testProviderConnection(input: ProviderConnectionInput) {
 export async function resolveProviderConnectionInput(
   input: Omit<ProviderConnectionInput, "apiKey"> & { apiKey?: string | null; id?: string | null },
 ): Promise<ProviderConnectionInput> {
+  const user = await requireCurrentUser();
   const trimmedKey = input.apiKey?.trim() ?? "";
   if (trimmedKey.length >= 6) {
     return {
@@ -253,10 +274,11 @@ export async function resolveProviderConnectionInput(
   const matchedProvider =
     (input.id
       ? await prisma.providerConfig.findUnique({
-          where: { id: input.id },
+          where: { id: input.id, userId: user.id },
         })
       : await prisma.providerConfig.findFirst({
           where: {
+            userId: user.id,
             OR: [{ baseUrl: input.baseUrl }, { isActive: true }],
           },
           orderBy: [{ isActive: "desc" }, { updatedAt: "desc" }],
@@ -297,6 +319,7 @@ export async function saveProviderConfig(
     };
   },
 ) {
+  const user = await requireCurrentUser();
   const discoveredModels = input.discoveredModels?.length
     ? enrichModelEndpointSupport(input.discoveredModels)
     : (await discoverProviderModels(input)).models;
@@ -308,13 +331,14 @@ export async function saveProviderConfig(
 
   if (nextIsActive) {
     await prisma.providerConfig.updateMany({
+      where: { userId: user.id },
       data: { isActive: false },
     });
   }
 
   const provider = input.id
     ? await prisma.providerConfig.update({
-        where: { id: input.id },
+        where: { id: input.id, userId: user.id },
         data: {
           name: input.name,
           baseUrl: input.baseUrl,
@@ -324,6 +348,7 @@ export async function saveProviderConfig(
       })
     : await prisma.providerConfig.create({
         data: {
+          userId: user.id,
           name: input.name,
           baseUrl: input.baseUrl,
           apiKeyEncrypted: encryptSecret(input.apiKey),
@@ -341,7 +366,9 @@ export async function saveProviderConfig(
 }
 
 export async function getAllProviderConfigs() {
+  const user = await requireCurrentUser();
   const providers = await prisma.providerConfig.findMany({
+    where: { userId: user.id },
     orderBy: { updatedAt: "desc" },
     include: {
       models: {
@@ -352,7 +379,7 @@ export async function getAllProviderConfigs() {
 
   return providers.map((provider) => {
     const apiKey = decryptSecret(provider.apiKeyEncrypted);
-    return {
+    return serializeProviderForClient({
       ...provider,
       apiKey,
       maskedApiKey: maskApiKey(apiKey),
@@ -361,13 +388,14 @@ export async function getAllProviderConfigs() {
         provider.baseUrl,
         hydrateProviderModels(provider.models) as RuntimeProviderModel[],
       ),
-    };
+    });
   });
 }
 
 export async function getActiveProviderConfig() {
+  const user = await requireCurrentUser();
   const provider = await prisma.providerConfig.findFirst({
-    where: { isActive: true },
+    where: { userId: user.id, isActive: true },
     include: {
       models: {
         orderBy: { modelId: "asc" },
@@ -378,7 +406,7 @@ export async function getActiveProviderConfig() {
   if (!provider) return null;
 
   const apiKey = decryptSecret(provider.apiKeyEncrypted);
-  return {
+  return serializeProviderForClient({
     ...provider,
     apiKey,
     maskedApiKey: maskApiKey(apiKey),
@@ -387,12 +415,13 @@ export async function getActiveProviderConfig() {
       provider.baseUrl,
       hydrateProviderModels(provider.models) as RuntimeProviderModel[],
     ),
-  };
+  });
 }
 
 export async function activateProviderConfig(providerId: string) {
+  const user = await requireCurrentUser();
   const provider = await prisma.providerConfig.findUnique({
-    where: { id: providerId },
+    where: { id: providerId, userId: user.id },
   });
 
   if (!provider) {
@@ -401,10 +430,11 @@ export async function activateProviderConfig(providerId: string) {
 
   await prisma.$transaction([
     prisma.providerConfig.updateMany({
+      where: { userId: user.id },
       data: { isActive: false },
     }),
     prisma.providerConfig.update({
-      where: { id: providerId },
+      where: { id: providerId, userId: user.id },
       data: { isActive: true },
     }),
   ]);
@@ -413,14 +443,15 @@ export async function activateProviderConfig(providerId: string) {
 }
 
 export async function getProviderAdapter(providerId?: string): Promise<ProviderAdapterContext> {
+  const user = await requireCurrentUser();
   const provider =
     (providerId
       ? await prisma.providerConfig.findUnique({
-          where: { id: providerId },
+          where: { id: providerId, userId: user.id },
           include: { models: true },
         })
       : await prisma.providerConfig.findFirst({
-          where: { isActive: true },
+          where: { userId: user.id, isActive: true },
           include: { models: true },
         })) ?? null;
 

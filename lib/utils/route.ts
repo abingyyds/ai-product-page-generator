@@ -55,6 +55,10 @@ export function handleRouteError(error: unknown) {
   }
 
   if (error instanceof Error) {
+    if (error.message === "AUTH_REQUIRED") {
+      return fail("AUTH_REQUIRED", "请先登录。", null, 401);
+    }
+
     const providerError = mapProviderError(error);
     if (providerError) {
       return fail(providerError.code, providerError.message, { rawMessage: error.message }, providerError.status);

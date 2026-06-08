@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import { buildSectionPlanningPrompt } from "@/lib/ai/prompts";
 import { sectionPlanOutputSchema } from "@/lib/ai/schemas/section-plan";
+import { requireProjectAccess, requireSectionAccess } from "@/lib/auth/authorization";
 import { prisma } from "@/lib/db/prisma";
 import { getProviderAdapter } from "@/lib/services/provider-service";
 import { completeTask, createTask, failTask, findRecentRunningTask } from "@/lib/services/task-service";
@@ -633,6 +634,7 @@ export async function planSections(
     autoDecideCounts?: boolean;
   },
 ) {
+  await requireProjectAccess(projectId);
   const project = await prisma.project.findUnique({
     where: { id: projectId },
     include: { analysis: true },
@@ -831,6 +833,7 @@ export async function createSection(
     editableFields?: Record<string, unknown>;
   },
 ) {
+  await requireProjectAccess(projectId);
   await assertSectionMutationAllowed(projectId, { addingType: input.type });
   const count = await prisma.pageSection.count({ where: { projectId } });
   const created = await prisma.pageSection.create({
@@ -854,6 +857,7 @@ export async function createSection(
 }
 
 export async function updateSection(sectionId: string, input: Record<string, unknown>) {
+  await requireSectionAccess(sectionId);
   const current = await prisma.pageSection.findUnique({
     where: { id: sectionId },
     select: { projectId: true },
@@ -889,6 +893,7 @@ export async function updateSection(sectionId: string, input: Record<string, unk
 }
 
 export async function deleteSection(sectionId: string) {
+  await requireSectionAccess(sectionId);
   const current = await prisma.pageSection.findUnique({
     where: { id: sectionId },
     select: { projectId: true },
@@ -907,6 +912,17 @@ export async function deleteSection(sectionId: string) {
 }
 
 export async function reorderSections(projectId: string, orderedSectionIds: string[]) {
+  await requireProjectAccess(projectId);
+  const ownedSectionCount = await prisma.pageSection.count({
+    where: {
+      id: { in: orderedSectionIds },
+      projectId,
+    },
+  });
+  if (ownedSectionCount !== orderedSectionIds.length) {
+    throw new Error("Section not found.");
+  }
+
   await prisma.$transaction(
     orderedSectionIds.map((sectionId, index) =>
       prisma.pageSection.update({

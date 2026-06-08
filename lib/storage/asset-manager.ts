@@ -4,6 +4,7 @@ import path from "path";
 import type { AssetType, ProductAsset } from "@prisma/client";
 import { nanoid } from "nanoid";
 
+import { requireAssetAccess } from "@/lib/auth/authorization";
 import { prisma } from "@/lib/db/prisma";
 import { env } from "@/lib/utils/env";
 import { extFromMime, relativeStorageUrl, sanitizeFileName } from "@/lib/utils/files";
@@ -142,6 +143,7 @@ export async function duplicateExportFile(params: {
 }
 
 export async function deleteAssetRecord(assetId: string) {
+  await requireAssetAccess(assetId);
   const asset = await prisma.productAsset.findUnique({ where: { id: assetId } });
   if (!asset) {
     return null;

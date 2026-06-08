@@ -4,6 +4,7 @@ import path from "path";
 
 import archiver from "archiver";
 
+import { requireProjectAccess } from "@/lib/auth/authorization";
 import { prisma } from "@/lib/db/prisma";
 import { completeTask, createTask, failTask, findRecentRunningTask } from "@/lib/services/task-service";
 import { readStorageFile } from "@/lib/storage/asset-manager";
@@ -78,6 +79,7 @@ function buildDetailAssets(project: {
 }
 
 export async function buildProjectJson(projectId: string) {
+  await requireProjectAccess(projectId);
   const project = await prisma.project.findUnique({
     where: { id: projectId },
     include: {
@@ -102,6 +104,7 @@ export async function buildProjectJson(projectId: string) {
 }
 
 export async function buildImageArchive(projectId: string) {
+  await requireProjectAccess(projectId);
   const project = await prisma.project.findUnique({
     where: { id: projectId },
     include: {

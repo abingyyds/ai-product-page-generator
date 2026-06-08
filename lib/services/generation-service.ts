@@ -7,6 +7,7 @@ import {
   buildSectionImagePrompt,
   buildSectionSvgLayoutPrompt,
 } from "@/lib/ai/prompts";
+import { requireProjectAccess, requireSectionAccess } from "@/lib/auth/authorization";
 import { prisma } from "@/lib/db/prisma";
 import { getProviderAdapter } from "@/lib/services/provider-service";
 import { completeTask, createTask, failTask, findRecentRunningTask } from "@/lib/services/task-service";
@@ -301,13 +302,16 @@ function mergeReferenceAssets(projectAssets: AssetRecord[], explicitReferenceAss
   return merged.filter((asset, index, list) => list.findIndex((entry) => entry.id === asset.id) === index);
 }
 
-async function resolveReferenceAssets(referenceAssetIds: string[]) {
+async function resolveReferenceAssets(projectId: string, referenceAssetIds: string[]) {
   if (!referenceAssetIds.length) {
     return [];
   }
 
   return prisma.productAsset.findMany({
-    where: { id: { in: referenceAssetIds } },
+    where: {
+      id: { in: referenceAssetIds },
+      projectId,
+    },
   });
 }
 
@@ -597,6 +601,7 @@ async function generateSectionImageInternal(
     regenerate?: boolean;
   },
 ) {
+  await requireProjectAccess(projectId);
   const project = await prisma.project.findUnique({
     where: { id: projectId },
     include: {
@@ -623,7 +628,7 @@ async function generateSectionImageInternal(
   const outputSize = getOutputSize(sectionAspectRatio);
   const modelCandidates = buildImageModelCandidates(provider, options);
   const selectedModel = modelCandidates[0] ?? null;
-  const explicitReferenceAssets = await resolveReferenceAssets(options?.referenceAssetIds ?? []);
+  const explicitReferenceAssets = await resolveReferenceAssets(projectId, options?.referenceAssetIds ?? []);
   const effectiveReferenceAssets = mergeReferenceAssets(project.assets as AssetRecord[], explicitReferenceAssets as AssetRecord[]);
   const referenceImages = await Promise.all(effectiveReferenceAssets.map((asset) => assetToDataUrl(asset)));
   const runningTask = await findRecentRunningTask({
@@ -828,6 +833,7 @@ export async function editSectionImage(
     editMode?: "repaint" | "enhance";
   },
 ) {
+  await requireProjectAccess(projectId);
   const project = await prisma.project.findUnique({
     where: { id: projectId },
     include: {
@@ -865,7 +871,7 @@ export async function editSectionImage(
     regenerate: true,
   });
   const selectedModel = modelCandidates[0] ?? null;
-  const explicitReferenceAssets = await resolveReferenceAssets(options?.referenceAssetIds ?? []);
+  const explicitReferenceAssets = await resolveReferenceAssets(projectId, options?.referenceAssetIds ?? []);
   const productReferenceAssets = mergeReferenceAssets(project.assets as AssetRecord[], explicitReferenceAssets as AssetRecord[]);
   const baseImage = await assetToDataUrl(section.currentImageAsset as AssetRecord);
   const referenceImages = await Promise.all(
@@ -1047,6 +1053,7 @@ export async function editSectionImage(
 }
 
 export async function listSectionVersions(sectionId: string) {
+  await requireSectionAccess(sectionId);
   return prisma.sectionVersion.findMany({
     where: { sectionId },
     orderBy: { versionNumber: "desc" },
@@ -1057,6 +1064,7 @@ export async function listSectionVersions(sectionId: string) {
 }
 
 export async function activateSectionVersion(sectionId: string, versionId: string) {
+  await requireSectionAccess(sectionId);
   const version = await prisma.sectionVersion.findUnique({
     where: { id: versionId },
   });

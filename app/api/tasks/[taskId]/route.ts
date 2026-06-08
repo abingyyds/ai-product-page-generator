@@ -1,8 +1,10 @@
+import { requireTaskAccess } from "@/lib/auth/authorization";
 import { prisma } from "@/lib/db/prisma";
 import { handleRouteError, ok } from "@/lib/utils/route";
 
 export async function GET(_request: Request, context: { params: { taskId: string } }) {
   try {
+    await requireTaskAccess(context.params.taskId);
     const task = await prisma.generationTask.findUnique({
       where: { id: context.params.taskId },
     });

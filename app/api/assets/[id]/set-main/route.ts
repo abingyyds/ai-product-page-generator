@@ -1,8 +1,10 @@
+import { requireAssetAccess } from "@/lib/auth/authorization";
 import { prisma } from "@/lib/db/prisma";
 import { handleRouteError, ok } from "@/lib/utils/route";
 
 export async function PATCH(_request: Request, context: { params: { id: string } }) {
   try {
+    await requireAssetAccess(context.params.id);
     const asset = await prisma.productAsset.findUnique({
       where: { id: context.params.id },
     });

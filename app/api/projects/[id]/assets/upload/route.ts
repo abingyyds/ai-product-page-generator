@@ -1,6 +1,7 @@
 import { NextRequest } from "next/server";
 import { z } from "zod";
 
+import { requireProjectAccess } from "@/lib/auth/authorization";
 import { prisma } from "@/lib/db/prisma";
 import { saveUploadAsset } from "@/lib/storage/asset-manager";
 import { handleRouteError, ok } from "@/lib/utils/route";
@@ -14,6 +15,7 @@ const uploadAssetSchema = z.object({
 
 export async function POST(request: NextRequest, context: { params: { id: string } }) {
   try {
+    await requireProjectAccess(context.params.id);
     const input = uploadAssetSchema.parse(await request.json());
     const existingCount = await prisma.productAsset.count({
       where: { projectId: context.params.id },
