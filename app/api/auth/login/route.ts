@@ -12,12 +12,13 @@ import { handleRouteError, ok } from "@/lib/utils/route";
 const loginSchema = z.object({
   username: z.string().trim().min(1, "请输入账号"),
   password: z.string().min(1, "请输入密码"),
+  siteUrl: z.string().trim().max(300, "站点地址过长").optional(),
 });
 
 export async function POST(request: NextRequest) {
   try {
     const input = loginSchema.parse(await request.json());
-    const result = await loginWithGatewayProviders(input.username, input.password);
+    const result = await loginWithGatewayProviders(input.username, input.password, input.siteUrl || null);
     const token = await createSessionToken({
       id: result.user.id,
       name: result.user.displayName ?? result.user.username ?? result.user.email,

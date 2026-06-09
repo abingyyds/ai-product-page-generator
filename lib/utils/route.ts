@@ -59,6 +59,10 @@ export function handleRouteError(error: unknown) {
       return fail("AUTH_REQUIRED", "请先登录。", null, 401);
     }
 
+    if (error.message === "APP_ADMIN_REQUIRED") {
+      return fail("APP_ADMIN_REQUIRED", "当前账号没有管理权限。", null, 403);
+    }
+
     const providerError = mapProviderError(error);
     if (providerError) {
       return fail(providerError.code, providerError.message, { rawMessage: error.message }, providerError.status);

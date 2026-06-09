@@ -85,6 +85,7 @@ model GatewayAccount {
   user                   AppUser  @relation(fields: [userId], references: [id], onDelete: Cascade)
   provider               String
   baseUrl                String
+  distHost               String?
   externalUserId         String?
   username               String?
   email                  String?

@@ -53,6 +53,8 @@ export async function getCurrentUser(request?: NextRequest): Promise<SessionUser
   return {
     id: user.id,
     name: user.displayName ?? user.username ?? user.email ?? session.name ?? null,
+    username: user.username,
+    email: user.email,
   };
 }
 

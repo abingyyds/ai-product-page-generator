@@ -1,10 +1,12 @@
 import { NextRequest } from "next/server";
 
+import { requireAppAdmin } from "@/lib/auth/admin";
 import { clearApiUsageEntries, deleteApiUsageEntry, getApiUsageSummary } from "@/lib/monitor/api-usage";
 import { handleRouteError, ok } from "@/lib/utils/route";
 
 export async function GET(request: NextRequest) {
   try {
+    await requireAppAdmin(request);
     const hours = Number(request.nextUrl.searchParams.get("hours") ?? "24");
     const limit = Number(request.nextUrl.searchParams.get("limit") ?? "20");
     const page = Number(request.nextUrl.searchParams.get("page") ?? "1");
@@ -31,6 +33,7 @@ export async function GET(request: NextRequest) {
 
 export async function DELETE(request: NextRequest) {
   try {
+    await requireAppAdmin(request);
     const entryId = request.nextUrl.searchParams.get("id");
     const result = entryId ? await deleteApiUsageEntry(entryId) : await clearApiUsageEntries();
     return ok(result);

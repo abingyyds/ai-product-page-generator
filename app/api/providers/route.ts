@@ -7,6 +7,7 @@ import {
   resolveProviderConnectionInput,
   saveProviderConfig,
 } from "@/lib/services/provider-service";
+import { requireAppAdmin } from "@/lib/auth/admin";
 import { providerSaveSchema } from "@/lib/validations/provider";
 import { handleRouteError, ok } from "@/lib/utils/route";
 
@@ -16,6 +17,7 @@ const providerActivateSchema = z.object({
 
 export async function GET() {
   try {
+    await requireAppAdmin();
     const providers = await getAllProviderConfigs();
     return ok(providers);
   } catch (error) {
@@ -25,6 +27,7 @@ export async function GET() {
 
 export async function POST(request: NextRequest) {
   try {
+    await requireAppAdmin(request);
     const parsed = providerSaveSchema.parse(await request.json());
     const resolved = await resolveProviderConnectionInput(parsed);
     const savedProviderId = await saveProviderConfig({
@@ -43,6 +46,7 @@ export async function POST(request: NextRequest) {
 
 export async function PATCH(request: NextRequest) {
   try {
+    await requireAppAdmin(request);
     const parsed = providerActivateSchema.parse(await request.json());
     const providers = await activateProviderConfig(parsed.providerId);
     return ok(providers);

@@ -6,8 +6,10 @@ import { DeleteUsageEntryButton } from "@/components/monitor/delete-usage-entry-
 import { PageHeader } from "@/components/shared/page-header";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { getCurrentAdmin } from "@/lib/auth/admin";
 import { prisma } from "@/lib/db/prisma";
 import { getApiUsageSummary, humanizeApiMonitorMessage, type ApiUsageEntry } from "@/lib/monitor/api-usage";
+import { notFound } from "next/navigation";
 
 export const dynamic = "force-dynamic";
 
@@ -63,6 +65,9 @@ export default async function ApiUsageMonitorPage({
 }: {
   searchParams?: Record<string, string | string[] | undefined>;
 }) {
+  const admin = await getCurrentAdmin();
+  if (!admin) notFound();
+
   const hours = Number(readSingle(searchParams?.hours) ?? "24");
   const projectId = readSingle(searchParams?.projectId) ?? "all";
   const category = readSingle(searchParams?.category) ?? "all";

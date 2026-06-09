@@ -5,11 +5,12 @@ import { recommendDefaultModels } from "@/lib/ai/model-matcher";
 import { prisma } from "@/lib/db/prisma";
 import { decryptSecret, encryptSecret } from "@/lib/utils/crypto";
 
-export type GatewayLoginProvider = "subrouterai" | "sub2api";
+export type GatewayLoginProvider = "subrouterai" | "subrouterai_dist" | "sub2api";
 
 export type GatewayLoginProviderConfig = {
   provider: GatewayLoginProvider;
   baseUrl: string;
+  distHost?: string;
 };
 
 type GatewayLoginOptions = GatewayLoginProviderConfig & {
@@ -44,12 +45,25 @@ type GatewayModel = {
   modalities?: string[];
 };
 
+type GatewayDistributorInfo = {
+  belongsToDistributor: boolean;
+  distributorId?: string;
+  distributorSlug?: string;
+  distributorName?: string;
+  status?: number;
+};
+
 const AUTO_KEY_PREFIX = "product-page-auto";
 const INTERNAL_GATEWAY_BASE_URL = "http://subrouter.railway.internal:8080";
 const DEFAULT_PROVIDER_NAME = "智能网关";
 
 function normalizeBaseUrl(baseUrl: string) {
-  return baseUrl.trim().replace(/\/+$/, "");
+  let text = baseUrl.trim().replace(/：/g, ":").replace(/\/+$/, "");
+  if (!text) return "";
+  if (/^https?:[^/]/i.test(text)) {
+    text = text.replace(/^(https?):/i, "$1://");
+  }
+  return /^https?:\/\//i.test(text) ? text : `https://${text}`;
 }
 
 function apiBase(baseUrl: string) {
@@ -75,6 +89,31 @@ function bearer(apiKey: string) {
   return `Bearer ${apiKey.replace(/^Bearer\s+/i, "")}`;
 }
 
+function normalizeHost(value?: string | null) {
+  const text = String(value || "")
+    .trim()
+    .replace(/：/g, ":");
+  if (!text) return "";
+
+  try {
+    return new URL(/^https?:\/\//i.test(text) ? text : `https://${text}`).host.toLowerCase();
+  } catch {
+    return text
+      .replace(/^https?:\/\//i, "")
+      .split("/")[0]
+      .toLowerCase();
+  }
+}
+
+function distContextHeaders(config: { distHost?: string | null }): Record<string, string> {
+  const host = normalizeHost(config.distHost);
+  if (!host) return {};
+  return {
+    "X-Original-Host": host,
+    "X-Forwarded-Host": host,
+  };
+}
+
 function extractItems(data: any): any[] {
   const candidates = [data?.data?.items, data?.data?.data, data?.data, data?.items, data];
   for (const item of candidates) {
@@ -85,6 +124,21 @@ function extractItems(data: any): any[] {
 
 function extractUser(data: any): Record<string, any> {
   return data?.data?.user || data?.data || data?.user || {};
+}
+
+function extractDistributorInfo(data: any): GatewayDistributorInfo | null {
+  const body = data?.data || data;
+  if (!body || typeof body !== "object") return null;
+  const distributor = body.distributor && typeof body.distributor === "object" ? body.distributor : {};
+  const distributorId = body.distributor_id ?? distributor.id;
+
+  return {
+    belongsToDistributor: Boolean(body.belongs_to_distributor) || Number(distributorId || 0) > 0,
+    distributorId: distributorId != null ? String(distributorId) : undefined,
+    distributorSlug: distributor.slug ? String(distributor.slug) : undefined,
+    distributorName: distributor.name ? String(distributor.name) : undefined,
+    status: distributor.status != null ? Number(distributor.status) : undefined,
+  };
 }
 
 function extractKey(data: any): { key?: string; id?: string } {
@@ -98,7 +152,7 @@ function extractKey(data: any): { key?: string; id?: string } {
 async function requestJson(
   baseUrl: string,
   path: string,
-  options: RequestInit & { timeoutMs?: number } = {},
+  options: RequestInit & { timeoutMs?: number; distHost?: string | null } = {},
 ) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 30000);
@@ -109,6 +163,7 @@ async function requestJson(
       signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
+        ...distContextHeaders(options as { distHost?: string | null }),
         ...(options.headers ?? {}),
       },
     });
@@ -147,9 +202,21 @@ function decryptNullable(value?: string | null) {
 }
 
 function authHeadersForGateway(account: StoredGatewayAccount): Record<string, string> {
-  const headers: Record<string, string> = { Cookie: account.sessionCookie || "" };
+  const headers: Record<string, string> = {
+    Cookie: account.sessionCookie || "",
+    ...distContextHeaders(account),
+  };
   if (account.externalUserId) headers["New-Api-User"] = String(account.externalUserId);
   return headers;
+}
+
+async function fetchGatewayDistributorInfo(login: GatewayLoginResult) {
+  if (!login.sessionCookie) return null;
+  const { data } = await requestJson(login.baseUrl, "/api/user/self/distributor", {
+    method: "GET",
+    headers: authHeadersForGateway({ ...login, userId: "" }),
+  }).catch(() => ({ data: null }));
+  return extractDistributorInfo(data);
 }
 
 async function loginGatewayA(options: GatewayLoginOptions): Promise<GatewayLoginResult> {
@@ -175,6 +242,39 @@ async function loginGatewayA(options: GatewayLoginOptions): Promise<GatewayLogin
   return {
     provider: "subrouterai",
     baseUrl: normalizeBaseUrl(options.baseUrl),
+    externalUserId: user.id != null ? String(user.id) : undefined,
+    username: user.username || options.username,
+    email: user.email,
+    displayName: user.display_name || user.displayName || user.username || options.username,
+    sessionCookie: cookie,
+  };
+}
+
+async function loginGatewayDist(options: GatewayLoginOptions): Promise<GatewayLoginResult> {
+  const { response, data } = await requestJson(options.baseUrl, "/api/dist/user/login", {
+    method: "POST",
+    distHost: options.distHost,
+    body: JSON.stringify({
+      username: options.username,
+      password: options.password,
+    }),
+    timeoutMs: options.timeoutMs,
+  });
+
+  if ((data as any)?.success === false) {
+    throw new Error((data as any)?.message || "登录失败");
+  }
+
+  const cookie = buildCookie(response.headers);
+  if (!cookie) {
+    throw new Error("登录成功但未返回会话信息");
+  }
+
+  const user = extractUser(data);
+  return {
+    provider: "subrouterai_dist",
+    baseUrl: normalizeBaseUrl(options.baseUrl),
+    distHost: normalizeHost(options.distHost || options.baseUrl) || undefined,
     externalUserId: user.id != null ? String(user.id) : undefined,
     username: user.username || options.username,
     email: user.email,
@@ -217,9 +317,13 @@ async function loginGatewayB(options: GatewayLoginOptions): Promise<GatewayLogin
 }
 
 async function authenticateGateway(options: GatewayLoginOptions) {
-  return options.provider === "subrouterai"
-    ? loginGatewayA(options)
-    : loginGatewayB(options);
+  if (options.provider === "subrouterai") {
+    return loginGatewayA(options);
+  }
+  if (options.provider === "subrouterai_dist") {
+    return loginGatewayDist(options);
+  }
+  return loginGatewayB(options);
 }
 
 async function listGatewayAKeys(account: StoredGatewayAccount) {
@@ -270,6 +374,60 @@ async function ensureGatewayAKey(account: StoredGatewayAccount) {
   return {
     key: `sk-${String(created.key).replace(/^sk-/, "")}`,
     id: created.id != null ? String(created.id) : undefined,
+  };
+}
+
+async function listGatewayDistKeys(account: StoredGatewayAccount) {
+  const { data } = await requestJson(account.baseUrl, "/api/dist/token/list", {
+    method: "GET",
+    headers: authHeadersForGateway(account),
+  });
+  if ((data as any)?.success === false) {
+    throw new Error((data as any)?.message || "获取访问密钥列表失败");
+  }
+  return extractItems(data);
+}
+
+async function ensureGatewayDistKey(account: StoredGatewayAccount) {
+  const existing = (await listGatewayDistKeys(account)).find(
+    (item) => String(item.name || "").startsWith(AUTO_KEY_PREFIX) && item.key,
+  );
+  if (existing?.key) {
+    return {
+      key: `sk-${String(existing.key).replace(/^sk-/, "")}`,
+      id: existing.id != null ? String(existing.id) : undefined,
+    };
+  }
+
+  const name = `${AUTO_KEY_PREFIX}-${Date.now()}`;
+  const { data } = await requestJson(account.baseUrl, "/api/dist/token/create", {
+    method: "POST",
+    headers: authHeadersForGateway(account),
+    body: JSON.stringify({
+      name,
+      key_group_id: 0,
+    }),
+  });
+
+  if ((data as any)?.success === false) {
+    throw new Error((data as any)?.message || "创建访问密钥失败");
+  }
+
+  const key = extractKey(data);
+  if (!key.key) {
+    const created = (await listGatewayDistKeys(account)).find((item) => item.name === name && item.key);
+    if (created?.key) {
+      return {
+        key: `sk-${String(created.key).replace(/^sk-/, "")}`,
+        id: created.id != null ? String(created.id) : undefined,
+      };
+    }
+    throw new Error("访问密钥已创建但未能读取");
+  }
+
+  return {
+    key: `sk-${String(key.key).replace(/^sk-/, "")}`,
+    id: key.id,
   };
 }
 
@@ -360,6 +518,26 @@ async function fetchGatewayAModels(account: StoredGatewayAccount): Promise<Gatew
   return fetchGatewayModels(account.baseUrl, account.apiKey || "");
 }
 
+async function fetchGatewayDistModels(account: StoredGatewayAccount): Promise<GatewayModel[]> {
+  const listed = await requestJson(account.baseUrl, "/api/dist/site/models", {
+    method: "GET",
+    distHost: account.distHost,
+  }).catch(() => ({ data: { data: [] } }));
+  const rows = extractItems(listed.data);
+  if (rows.length > 0) {
+    return rows
+      .map((row) => ({
+        id: String(row.model_name || row.modelName || row.id || row.name || "").trim(),
+        label: row.display_name || row.name || row.model_name || row.modelName || row.id,
+        type: row.type,
+        category: row.category || row.type,
+      }))
+      .filter((item) => item.id);
+  }
+
+  return fetchGatewayModels(account.baseUrl, account.apiKey || "");
+}
+
 async function fetchGatewayBModels(account: StoredGatewayAccount): Promise<GatewayModel[]> {
   return fetchGatewayModels(account.baseUrl, account.apiKey || "");
 }
@@ -408,6 +586,7 @@ function hydrateStoredAccount(row: Awaited<ReturnType<typeof prisma.gatewayAccou
     userId: row.userId,
     provider: row.provider as GatewayLoginProvider,
     baseUrl: row.baseUrl,
+    distHost: row.distHost ?? undefined,
     externalUserId: row.externalUserId ?? undefined,
     username: row.username ?? undefined,
     email: row.email ?? undefined,
@@ -431,6 +610,7 @@ async function saveGatewayAccount(account: StoredGatewayAccount) {
       },
     },
     update: {
+      distHost: account.distHost ?? null,
       externalUserId: account.externalUserId ?? null,
       username: account.username ?? null,
       email: account.email ?? null,
@@ -446,6 +626,7 @@ async function saveGatewayAccount(account: StoredGatewayAccount) {
       userId: account.userId,
       provider: account.provider,
       baseUrl: account.baseUrl,
+      distHost: account.distHost ?? null,
       externalUserId: account.externalUserId ?? null,
       username: account.username ?? null,
       email: account.email ?? null,
@@ -568,8 +749,13 @@ async function upsertUserProviderFromGateway(account: StoredGatewayAccount, mode
 }
 
 function parseProviderName(value: unknown): GatewayLoginProvider | null {
-  const normalized = String(value || "").trim().toLowerCase();
-  return normalized === "subrouterai" || normalized === "sub2api" ? normalized : null;
+  const normalized = String(value || "").trim().toLowerCase().replace(/[-\s]/g, "_");
+  if (normalized === "dist" || normalized === "branch" || normalized === "subrouter_dist") {
+    return "subrouterai_dist";
+  }
+  return normalized === "subrouterai" || normalized === "subrouterai_dist" || normalized === "sub2api"
+    ? normalized
+    : null;
 }
 
 function normalizeLoginProviders(providers: Array<Partial<GatewayLoginProviderConfig> | null | undefined>) {
@@ -579,11 +765,12 @@ function normalizeLoginProviders(providers: Array<Partial<GatewayLoginProviderCo
   for (const item of providers) {
     const provider = parseProviderName(item?.provider);
     const baseUrl = typeof item?.baseUrl === "string" ? normalizeBaseUrl(item.baseUrl) : "";
+    const distHost = typeof item?.distHost === "string" ? normalizeHost(item.distHost) : undefined;
     if (!provider || !baseUrl) continue;
-    const key = `${provider}:${baseUrl}`;
+    const key = `${provider}:${baseUrl}:${distHost || ""}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    result.push({ provider, baseUrl });
+    result.push({ provider, baseUrl, distHost });
   }
 
   return result;
@@ -606,14 +793,16 @@ function parseLoginProviderEnv(value?: string) {
       const text = entry.trim();
       if (!text) return [];
 
-      const matched = text.match(/^(subrouterai|sub2api)\s*=\s*(.+)$/i);
+      const matched = text.match(/^([a-z0-9_\-\s]+)\s*=\s*(.+)$/i);
       if (matched) {
-        return [{ provider: matched[1].toLowerCase() as GatewayLoginProvider, baseUrl: matched[2].trim() }];
+        const provider = parseProviderName(matched[1]);
+        return provider ? [{ provider, baseUrl: matched[2].trim() }] : [];
       }
 
       if (/^https?:\/\//i.test(text)) {
         return [
           { provider: "subrouterai" as const, baseUrl: text },
+          { provider: "subrouterai_dist" as const, baseUrl: text },
           { provider: "sub2api" as const, baseUrl: text },
         ];
       }
@@ -621,6 +810,124 @@ function parseLoginProviderEnv(value?: string) {
       return [];
     }),
   );
+}
+
+function parseBaseUrlList(value?: string) {
+  return String(value || "")
+    .split(/[,\n;]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parseDistBaseUrlMap(value?: string) {
+  const map = new Map<string, string>();
+  const raw = String(value || "").trim();
+  if (!raw) return map;
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      for (const [key, baseUrl] of Object.entries(parsed)) {
+        if (typeof baseUrl === "string" && key.trim() && baseUrl.trim()) {
+          map.set(key.trim().toLowerCase(), normalizeBaseUrl(baseUrl));
+        }
+      }
+      return map;
+    }
+  } catch {
+    // Also support slug=https://site;123=https://site.
+  }
+
+  for (const entry of raw.split(/[,\n;]/)) {
+    const [key, ...rest] = entry.split("=");
+    const baseUrl = rest.join("=").trim();
+    if (key?.trim() && baseUrl) {
+      map.set(key.trim().toLowerCase(), normalizeBaseUrl(baseUrl));
+    }
+  }
+
+  return map;
+}
+
+function parseDistHostMap(value?: string) {
+  const map = new Map<string, string>();
+  const raw = String(value || "").trim();
+  if (!raw) return map;
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      for (const [key, host] of Object.entries(parsed)) {
+        const normalized = normalizeHost(typeof host === "string" ? host : "");
+        if (key.trim() && normalized) map.set(key.trim().toLowerCase(), normalized);
+      }
+      return map;
+    }
+  } catch {
+    // Also support slug=site.example.com;123=site.example.com.
+  }
+
+  for (const entry of raw.split(/[,\n;]/)) {
+    const [key, ...rest] = entry.split("=");
+    const host = normalizeHost(rest.join("=").trim());
+    if (key?.trim() && host) {
+      map.set(key.trim().toLowerCase(), host);
+    }
+  }
+
+  return map;
+}
+
+function getDistSubdomainSuffixes() {
+  return parseBaseUrlList(
+    process.env.BANANA_MALL_GATEWAY_DIST_SUBDOMAIN_SUFFIXES ||
+      process.env.BANANA_MALL_GATEWAY_DIST_SUBDOMAIN_SUFFIX ||
+      process.env.DIST_SUBDOMAIN_SUFFIX,
+  ).map((suffix) => normalizeHost(suffix));
+}
+
+function inferDistHostFromInfo(info?: GatewayDistributorInfo | null) {
+  if (!info?.belongsToDistributor) return "";
+
+  const hostMap = parseDistHostMap(
+    process.env.BANANA_MALL_GATEWAY_DIST_HOSTS ||
+      process.env.BANANA_MALL_GATEWAY_DIST_HOST_MAP ||
+      process.env.SUBROUTER_DIST_HOST_MAP,
+  );
+  const keys = [info.distributorId, info.distributorSlug]
+    .map((item) => String(item || "").trim().toLowerCase())
+    .filter(Boolean);
+  for (const key of keys) {
+    const host = hostMap.get(key);
+    if (host) return host;
+  }
+
+  const suffix = getDistSubdomainSuffixes()[0];
+  if (suffix && info.distributorSlug) {
+    return `${info.distributorSlug}.${suffix}`;
+  }
+
+  return "";
+}
+
+function getDistBaseUrlFromInfo(info?: GatewayDistributorInfo | null) {
+  if (!info?.belongsToDistributor) return "";
+
+  const baseUrlMap = parseDistBaseUrlMap(
+    process.env.BANANA_MALL_GATEWAY_DIST_BASE_URL_MAP ||
+      process.env.BANANA_MALL_GATEWAY_DIST_URLS ||
+      process.env.SUBROUTER_DIST_BASE_URL_MAP,
+  );
+  const keys = [info.distributorId, info.distributorSlug]
+    .map((item) => String(item || "").trim().toLowerCase())
+    .filter(Boolean);
+  for (const key of keys) {
+    const baseUrl = baseUrlMap.get(key);
+    if (baseUrl) return baseUrl;
+  }
+
+  const host = inferDistHostFromInfo(info);
+  return host ? normalizeBaseUrl(host) : "";
 }
 
 export function getGatewayLoginProviders() {
@@ -666,9 +973,115 @@ export function getGatewayLoginProviders() {
   ]);
 }
 
-export async function loginWithGatewayProviders(username: string, password: string) {
-  const providers = getGatewayLoginProviders();
+function getGatewayDistLoginProviders(siteUrl?: string | null) {
+  const candidates = [
+    siteUrl,
+    process.env.BANANA_MALL_GATEWAY_DIST_BASE_URL,
+    process.env.TOONFLOW_SUBROUTER_DIST_BASE_URL,
+    ...parseBaseUrlList(
+      process.env.BANANA_MALL_GATEWAY_DIST_BASE_URLS ||
+        process.env.TOONFLOW_SUBROUTER_DIST_BASE_URLS ||
+        process.env.SUBROUTER_DIST_BASE_URLS,
+    ),
+  ];
+
+  return normalizeLoginProviders(
+    candidates.map((baseUrl) => ({
+      provider: "subrouterai_dist" as const,
+      baseUrl: baseUrl ?? undefined,
+    })),
+  );
+}
+
+function getGatewayDistProvidersForDistributor(
+  info: GatewayDistributorInfo | null | undefined,
+  mainBaseUrl: string,
+  siteUrl?: string | null,
+) {
+  const providers: Array<Partial<GatewayLoginProviderConfig>> = [...getGatewayDistLoginProviders(siteUrl)];
+  const distHost = inferDistHostFromInfo(info);
+  const mappedBaseUrl = getDistBaseUrlFromInfo(info);
+
+  if (mappedBaseUrl) {
+    providers.push({
+      provider: "subrouterai_dist",
+      baseUrl: mappedBaseUrl,
+      distHost: normalizeHost(mappedBaseUrl),
+    });
+  }
+
+  if (distHost) {
+    providers.push(
+      {
+        provider: "subrouterai_dist",
+        baseUrl: mainBaseUrl,
+        distHost,
+      },
+      {
+        provider: "subrouterai_dist",
+        baseUrl: normalizeBaseUrl(distHost),
+        distHost,
+      },
+    );
+  }
+
+  return normalizeLoginProviders(providers);
+}
+
+function orderLoginProviders(siteUrl?: string | null) {
+  const distProviders = getGatewayDistLoginProviders(siteUrl);
+  const baseProviders = getGatewayLoginProviders();
+  return siteUrl ? [...distProviders, ...baseProviders] : [...baseProviders, ...distProviders];
+}
+
+function isDistKeyError(error: unknown) {
+  return error instanceof Error && /分站用户请使用分站密钥接口|分站密钥接口/.test(error.message);
+}
+
+async function completeGatewayLogin(login: GatewayLoginResult) {
+  const user = await upsertAppUser(login);
+  const account: StoredGatewayAccount = {
+    ...login,
+    userId: user.id,
+  };
+  const key =
+    account.provider === "sub2api"
+      ? await ensureGatewayBKey(account)
+      : account.provider === "subrouterai_dist"
+        ? await ensureGatewayDistKey(account)
+        : await ensureGatewayAKey(account);
+  account.apiKey = key.key;
+  account.apiKeyId = key.id;
+
+  const models =
+    account.provider === "sub2api"
+      ? await fetchGatewayBModels(account)
+      : account.provider === "subrouterai_dist"
+        ? await fetchGatewayDistModels(account)
+        : await fetchGatewayAModels(account);
+  account.modelsSnapshot = models;
+  await saveGatewayAccount(account);
+  const providerConfigId = await upsertUserProviderFromGateway(account, models);
+
+  return {
+    user,
+    account: {
+      provider: account.provider,
+      baseUrl: account.baseUrl,
+      username: account.username,
+      email: account.email,
+      displayName: account.displayName,
+      apiKeyReady: Boolean(account.apiKey),
+    },
+    models,
+    providerConfigId,
+  };
+}
+
+export async function loginWithGatewayProviders(username: string, password: string, siteUrl?: string | null) {
+  const providers = orderLoginProviders(siteUrl);
   let lastError: unknown;
+  let sawDistKeyError = false;
 
   for (const provider of providers) {
     try {
@@ -678,40 +1091,45 @@ export async function loginWithGatewayProviders(username: string, password: stri
         password,
         timeoutMs: 10000,
       });
-      const user = await upsertAppUser(login);
-      const account: StoredGatewayAccount = {
-        ...login,
-        userId: user.id,
-      };
-      const key = account.provider === "subrouterai"
-        ? await ensureGatewayAKey(account)
-        : await ensureGatewayBKey(account);
-      account.apiKey = key.key;
-      account.apiKeyId = key.id;
 
-      const models = account.provider === "subrouterai"
-        ? await fetchGatewayAModels(account)
-        : await fetchGatewayBModels(account);
-      account.modelsSnapshot = models;
-      await saveGatewayAccount(account);
-      const providerConfigId = await upsertUserProviderFromGateway(account, models);
+      if (login.provider === "subrouterai") {
+        const distributor = await fetchGatewayDistributorInfo(login);
+        if (distributor?.belongsToDistributor) {
+          const distProviders = getGatewayDistProvidersForDistributor(distributor, login.baseUrl, siteUrl);
+          if (distProviders.length === 0) {
+            throw new Error("当前账号属于分站，请填写站点地址后登录，或联系管理员配置站点地址。");
+          }
 
-      return {
-        user,
-        account: {
-          provider: account.provider,
-          baseUrl: account.baseUrl,
-          username: account.username,
-          email: account.email,
-          displayName: account.displayName,
-          apiKeyReady: Boolean(account.apiKey),
-        },
-        models,
-        providerConfigId,
-      };
+          let distError: unknown;
+          for (const distProvider of distProviders) {
+            try {
+              return await completeGatewayLogin({
+                ...login,
+                ...distProvider,
+                provider: "subrouterai_dist",
+              });
+            } catch (error) {
+              distError = error;
+            }
+          }
+
+          throw distError instanceof Error
+            ? distError
+            : new Error("当前账号属于分站，但未能连接到对应站点。");
+        }
+      }
+
+      return await completeGatewayLogin(login);
     } catch (error) {
+      if (isDistKeyError(error)) {
+        sawDistKeyError = true;
+      }
       lastError = error;
     }
+  }
+
+  if (sawDistKeyError && getGatewayDistLoginProviders(siteUrl).length === 0) {
+    throw new Error("当前账号属于分站，请填写站点地址后登录。");
   }
 
   throw lastError instanceof Error ? lastError : new Error("账号或密码错误");
@@ -731,9 +1149,12 @@ export async function refreshGatewayModelsForUser(userId: string) {
     throw new Error("当前账号尚未连接智能网关");
   }
 
-  const models = account.provider === "subrouterai"
-    ? await fetchGatewayAModels(account)
-    : await fetchGatewayBModels(account);
+  const models =
+    account.provider === "sub2api"
+      ? await fetchGatewayBModels(account)
+      : account.provider === "subrouterai_dist"
+        ? await fetchGatewayDistModels(account)
+        : await fetchGatewayAModels(account);
   account.modelsSnapshot = models;
   await saveGatewayAccount(account);
   await upsertUserProviderFromGateway(account, models);

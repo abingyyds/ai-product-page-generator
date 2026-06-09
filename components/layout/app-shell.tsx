@@ -5,6 +5,7 @@ import { LogoutButton } from "@/components/auth/logout-button";
 import { ApiUsageIndicator } from "@/components/layout/api-usage-indicator";
 import { FloatingThemeToggle } from "@/components/layout/theme-toggle";
 import { buttonVariants } from "@/components/ui/button";
+import { isAppAdmin } from "@/lib/auth/admin";
 import { getCurrentUser } from "@/lib/auth/session";
 import { cn } from "@/lib/utils";
 
@@ -18,6 +19,7 @@ const navItems = [
 
 export async function AppShell({ children }: { children: React.ReactNode }) {
   const user = await getCurrentUser();
+  const isAdmin = isAppAdmin(user);
 
   if (!user) {
     return <>{children}</>;
@@ -106,20 +108,24 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
               <UserCircle2 className="h-4 w-4 text-slate-500 dark:text-slate-300" />
               <span className="max-w-[180px] truncate font-medium">{user.name ?? "当前账号"}</span>
             </div>
-            <Link
-              href="/monitor/usage"
-              className={cn(
-                buttonVariants({ variant: "outline" }),
-                "h-10 gap-2 rounded-2xl border-slate-200 bg-white px-3 shadow-sm hover:bg-white dark:border-white/10 dark:bg-black/30 dark:hover:border-white/20 dark:hover:bg-white/8",
-              )}
-            >
-              <span className="text-sm font-medium">API 监控</span>
-              <ApiUsageIndicator />
-            </Link>
-            <Link href="/settings/providers" className={cn(buttonVariants({ variant: "default" }))}>
-              <Settings2 className="mr-2 h-4 w-4" />
-              AI 配置
-            </Link>
+            {isAdmin ? (
+              <>
+                <Link
+                  href="/monitor/usage"
+                  className={cn(
+                    buttonVariants({ variant: "outline" }),
+                    "h-10 gap-2 rounded-2xl border-slate-200 bg-white px-3 shadow-sm hover:bg-white dark:border-white/10 dark:bg-black/30 dark:hover:border-white/20 dark:hover:bg-white/8",
+                  )}
+                >
+                  <span className="text-sm font-medium">API 监控</span>
+                  <ApiUsageIndicator />
+                </Link>
+                <Link href="/settings/providers" className={cn(buttonVariants({ variant: "default" }))}>
+                  <Settings2 className="mr-2 h-4 w-4" />
+                  AI 配置
+                </Link>
+              </>
+            ) : null}
             <LogoutButton />
           </div>
           {children}

@@ -4,6 +4,8 @@ export const SESSION_TTL_SECONDS = 60 * 60 * 24 * 180;
 export type SessionUser = {
   id: string;
   name?: string | null;
+  username?: string | null;
+  email?: string | null;
 };
 
 type SessionPayload = {

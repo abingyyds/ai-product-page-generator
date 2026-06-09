@@ -139,11 +139,21 @@ Create `.env` based on `.env.example`:
 OPENAI_API_KEY=
 OPENAI_BASE_URL=
 DATABASE_URL=
+APP_SECRET=
+BANANA_MALL_GATEWAY_BASE_URL=
+BANANA_MALL_ADMIN_USERS=
+BANANA_MALL_GATEWAY_DIST_SUBDOMAIN_SUFFIX=
+BANANA_MALL_GATEWAY_DIST_HOST_MAP=
 ```
 
 Supports any OpenAI-compatible API.  
 支持任意 OpenAI-compatible API（包括代理或自建服务）。
 你可以不在此处配置，直接在项目页面右上角的设置中设置即可。
+
+Railway 单容器部署时，`BANANA_MALL_GATEWAY_BASE_URL` 可指向同项目内网关的私网地址。分站用户登录可通过
+`BANANA_MALL_GATEWAY_DIST_SUBDOMAIN_SUFFIX=example.com` 自动把分站 `slug` 映射为 `slug.example.com`；特殊域名可用
+`BANANA_MALL_GATEWAY_DIST_HOST_MAP='{"slug":"shop.example.com"}'` 或 `BANANA_MALL_GATEWAY_DIST_BASE_URLS` 配置。
+只有 `BANANA_MALL_ADMIN_USERS` / `BANANA_MALL_ADMIN_EMAILS` 指定的账号能看到 AI 配置和监控入口。
 <img width="3840" height="2029" alt="image" src="https://github.com/user-attachments/assets/c1068c54-073f-4438-b279-261cf646bc3f" />
 
 ---
@@ -298,4 +308,3 @@ If you like this project, give it a star ⭐
 让灵感落地，让回忆有形
 
 </div>
-

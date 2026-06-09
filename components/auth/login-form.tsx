@@ -14,6 +14,7 @@ export function LoginForm() {
   const searchParams = useSearchParams();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [siteUrl, setSiteUrl] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -28,7 +29,7 @@ export function LoginForm() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username, password, siteUrl: siteUrl.trim() || undefined }),
       });
       const payload = await response.json();
 
@@ -82,6 +83,17 @@ export function LoginForm() {
               onChange={(event) => setPassword(event.target.value)}
               placeholder="请输入密码"
               required
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="siteUrl">站点地址（可选）</Label>
+            <Input
+              id="siteUrl"
+              type="text"
+              autoComplete="url"
+              value={siteUrl}
+              onChange={(event) => setSiteUrl(event.target.value)}
+              placeholder="https://你的站点域名"
             />
           </div>
           {error ? (
