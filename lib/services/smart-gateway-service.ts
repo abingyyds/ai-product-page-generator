@@ -210,6 +210,12 @@ function authHeadersForGateway(account: StoredGatewayAccount): Record<string, st
   return headers;
 }
 
+function authHeadersForGatewaySession(account: StoredGatewayAccount): Record<string, string> {
+  const headers: Record<string, string> = { Cookie: account.sessionCookie || "" };
+  if (account.externalUserId) headers["New-Api-User"] = String(account.externalUserId);
+  return headers;
+}
+
 async function fetchGatewayDistributorInfo(login: GatewayLoginResult) {
   if (!login.sessionCookie) return null;
   const { data } = await requestJson(login.baseUrl, "/api/user/self/distributor", {
@@ -388,10 +394,25 @@ async function listGatewayDistKeys(account: StoredGatewayAccount) {
   return extractItems(data);
 }
 
+async function listGatewaySelfDistKeys(account: StoredGatewayAccount) {
+  const { data } = await requestJson(account.baseUrl, "/api/user/self/distributor/token/list", {
+    method: "GET",
+    headers: authHeadersForGatewaySession(account),
+  });
+  if ((data as any)?.success === false) {
+    throw new Error((data as any)?.message || "获取访问密钥列表失败");
+  }
+  return extractItems(data);
+}
+
 async function ensureGatewayDistKey(account: StoredGatewayAccount) {
-  const existing = (await listGatewayDistKeys(account)).find(
-    (item) => String(item.name || "").startsWith(AUTO_KEY_PREFIX) && item.key,
-  );
+  let useSelfDistTokenEndpoint = true;
+  let keys = await listGatewaySelfDistKeys(account).catch(() => {
+    useSelfDistTokenEndpoint = false;
+    return listGatewayDistKeys(account);
+  });
+
+  const existing = keys.find((item) => String(item.name || "").startsWith(AUTO_KEY_PREFIX) && item.key);
   if (existing?.key) {
     return {
       key: `sk-${String(existing.key).replace(/^sk-/, "")}`,
@@ -400,14 +421,18 @@ async function ensureGatewayDistKey(account: StoredGatewayAccount) {
   }
 
   const name = `${AUTO_KEY_PREFIX}-${Date.now()}`;
-  const { data } = await requestJson(account.baseUrl, "/api/dist/token/create", {
-    method: "POST",
-    headers: authHeadersForGateway(account),
-    body: JSON.stringify({
-      name,
-      key_group_id: 0,
-    }),
-  });
+  const { data } = await requestJson(
+    account.baseUrl,
+    useSelfDistTokenEndpoint ? "/api/user/self/distributor/token/create" : "/api/dist/token/create",
+    {
+      method: "POST",
+      headers: useSelfDistTokenEndpoint ? authHeadersForGatewaySession(account) : authHeadersForGateway(account),
+      body: JSON.stringify({
+        name,
+        key_group_id: 0,
+      }),
+    },
+  );
 
   if ((data as any)?.success === false) {
     throw new Error((data as any)?.message || "创建访问密钥失败");
@@ -415,7 +440,8 @@ async function ensureGatewayDistKey(account: StoredGatewayAccount) {
 
   const key = extractKey(data);
   if (!key.key) {
-    const created = (await listGatewayDistKeys(account)).find((item) => item.name === name && item.key);
+    keys = useSelfDistTokenEndpoint ? await listGatewaySelfDistKeys(account) : await listGatewayDistKeys(account);
+    const created = keys.find((item) => item.name === name && item.key);
     if (created?.key) {
       return {
         key: `sk-${String(created.key).replace(/^sk-/, "")}`,
@@ -998,7 +1024,10 @@ function getGatewayDistProvidersForDistributor(
   mainBaseUrl: string,
   siteUrl?: string | null,
 ) {
-  const providers: Array<Partial<GatewayLoginProviderConfig>> = [...getGatewayDistLoginProviders(siteUrl)];
+  const providers: Array<Partial<GatewayLoginProviderConfig>> = [
+    { provider: "subrouterai_dist", baseUrl: mainBaseUrl },
+    ...getGatewayDistLoginProviders(siteUrl),
+  ];
   const distHost = inferDistHostFromInfo(info);
   const mappedBaseUrl = getDistBaseUrlFromInfo(info);
 
@@ -1036,6 +1065,13 @@ function orderLoginProviders(siteUrl?: string | null) {
 
 function isDistKeyError(error: unknown) {
   return error instanceof Error && /分站用户请使用分站密钥接口|分站密钥接口/.test(error.message);
+}
+
+function needsDistSiteAddress(error: unknown) {
+  return (
+    error instanceof Error &&
+    /此 API 仅供分站访问|无法识别分销商|分站不存在|404|not found/i.test(error.message)
+  );
 }
 
 async function completeGatewayLogin(login: GatewayLoginResult) {
@@ -1111,6 +1147,13 @@ export async function loginWithGatewayProviders(username: string, password: stri
             } catch (error) {
               distError = error;
             }
+          }
+
+          const hasDistContext = distProviders.some(
+            (item) => item.distHost || normalizeBaseUrl(item.baseUrl) !== normalizeBaseUrl(login.baseUrl),
+          );
+          if (!hasDistContext && needsDistSiteAddress(distError)) {
+            throw new Error("当前账号属于分站，请填写站点地址后登录，或联系管理员升级网关接口。");
           }
 
           throw distError instanceof Error
