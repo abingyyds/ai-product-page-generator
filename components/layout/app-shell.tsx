@@ -15,6 +15,7 @@ const navItems = [
   { href: "/history", label: "历史记录", icon: History },
   { href: "/xiaohongshu/plan", label: "小红书图文", icon: BookOpenText },
   { href: "/projects/new", label: "高级创建", icon: GalleryVerticalEnd },
+  { href: "/settings/providers", label: "AI 模型设置", icon: Settings2 },
 ];
 
 export async function AppShell({ children }: { children: React.ReactNode }) {
@@ -104,6 +105,16 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
 
         <main className="min-w-0 rounded-[2rem] border border-white/80 bg-white/74 p-5 shadow-soft backdrop-blur-2xl dark:border-white/10 dark:bg-[#0f0f10]/82 dark:shadow-[0_24px_60px_-38px_rgba(0,0,0,0.78)] md:ml-[19.5rem] md:p-8">
           <div className="mb-6 flex flex-wrap items-center justify-end gap-3">
+            <Link
+              href="/settings/providers"
+              className={cn(
+                buttonVariants({ variant: "default" }),
+                "h-10 gap-2 rounded-2xl px-3 shadow-sm",
+              )}
+            >
+              <Settings2 className="h-4 w-4" />
+              <span className="text-sm font-medium">AI 模型</span>
+            </Link>
             <div className="flex h-10 items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 text-sm shadow-sm dark:border-white/10 dark:bg-black/30">
               <UserCircle2 className="h-4 w-4 text-slate-500 dark:text-slate-300" />
               <span className="max-w-[180px] truncate font-medium">{user.name ?? "当前账号"}</span>
@@ -119,10 +130,6 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
                 >
                   <span className="text-sm font-medium">API 监控</span>
                   <ApiUsageIndicator />
-                </Link>
-                <Link href="/settings/providers" className={cn(buttonVariants({ variant: "default" }))}>
-                  <Settings2 className="mr-2 h-4 w-4" />
-                  AI 配置
                 </Link>
               </>
             ) : null}

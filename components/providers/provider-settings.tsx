@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { toast } from "sonner";
-import { ChevronsUpDown, CopyPlus, History, Loader2, PlugZap, Save, Search } from "lucide-react";
+import { ChevronsUpDown, CopyPlus, History, KeyRound, Loader2, PlugZap, RefreshCw, Save, Search } from "lucide-react";
 import { z } from "zod";
 
 import { Badge } from "@/components/ui/badge";
@@ -46,6 +46,17 @@ type ProviderRecord = {
   isActive: boolean;
   updatedAt: string | Date;
   models: ProviderModelRecord[];
+};
+
+type GatewayStatus = {
+  connected: boolean;
+  account: {
+    username?: string | null;
+    email?: string | null;
+    displayName?: string | null;
+    apiKeyReady: boolean;
+  } | null;
+  models: Array<Record<string, unknown>>;
 };
 
 interface ProviderSettingsProps {
@@ -261,7 +272,7 @@ function getModelsForType(models: GenericModelRecord[], typeKey: ModelTypeKey) {
 }
 
 function isManagedGatewayProvider(provider: ProviderRecord | null | undefined) {
-  return provider?.name === "智能网关" && provider.baseUrl === "自动配置";
+  return Boolean(provider && (provider.name === "智能网关" || provider.name.startsWith("智能网关 / ")) && provider.baseUrl === "自动配置");
 }
 
 function getTypeDefaultValue(defaults: DefaultAssignments, typeKey: ModelTypeKey) {
@@ -423,6 +434,23 @@ function formatTimeLabel(value: string | Date) {
   }).format(date);
 }
 
+function countModelsByType(models: GenericModelRecord[], typeKey: ModelTypeKey) {
+  return getModelsForType(models, typeKey).length;
+}
+
+async function fetchSavedProviders() {
+  const response = await fetch("/api/providers", {
+    cache: "no-store",
+  });
+  const payload = await response.json();
+
+  if (!response.ok || !payload.success) {
+    throw new Error(payload.error?.message ?? "加载 AI 配置失败");
+  }
+
+  return (payload.data ?? []) as ProviderRecord[];
+}
+
 export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
   const [providers, setProviders] = useState(initialProviders);
   const activeProvider = useMemo(
@@ -430,8 +458,11 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
     [providers],
   );
   const [selectedProviderId, setSelectedProviderId] = useState(activeProvider?.id ?? "");
-  const [loading, setLoading] = useState<null | "test" | "discover" | "save" | "saveAsNew">(null);
+  const [loading, setLoading] = useState<null | "test" | "discover" | "save" | "saveAsNew" | "refreshGateway" | "saveDefaults">(null);
   const [switchingProviderId, setSwitchingProviderId] = useState<string | null>(null);
+  const [gatewayStatus, setGatewayStatus] = useState<GatewayStatus | null>(null);
+  const [gatewayStatusLoading, setGatewayStatusLoading] = useState(false);
+  const [gatewayStatusError, setGatewayStatusError] = useState<string | null>(null);
   const selectedProvider = useMemo(
     () => providers.find((item) => item.id === selectedProviderId) ?? activeProvider,
     [providers, selectedProviderId, activeProvider],
@@ -472,6 +503,68 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
     [models],
   );
   const capabilityGroups = useMemo(() => buildCapabilityGroups(models), [models]);
+  const selectedDefaultCount = useMemo(
+    () => Object.values(defaults).filter(Boolean).length,
+    [defaults],
+  );
+  const unavailableModelCount = useMemo(
+    () => models.filter((model) => model.isAvailable === false).length,
+    [models],
+  );
+  const modelSummary = useMemo(
+    () => ({
+      text: countModelsByType(models, "text"),
+      vision: countModelsByType(models, "vision"),
+      imageGeneration: countModelsByType(models, "image_gen"),
+      imageEdit: countModelsByType(models, "image_edit"),
+    }),
+    [models],
+  );
+
+  useEffect(() => {
+    if (!selectedProviderIsManaged) {
+      setGatewayStatus(null);
+      setGatewayStatusError(null);
+      setGatewayStatusLoading(false);
+      return;
+    }
+
+    let aborted = false;
+
+    async function loadGatewayStatus() {
+      try {
+        setGatewayStatusLoading(true);
+        setGatewayStatusError(null);
+
+        const response = await fetch("/api/gateway/models", {
+          cache: "no-store",
+        });
+        const payload = await response.json();
+
+        if (!response.ok || !payload.success) {
+          throw new Error(payload.error?.message ?? "读取智能网关状态失败");
+        }
+
+        if (!aborted) {
+          setGatewayStatus(payload.data);
+        }
+      } catch (error) {
+        if (!aborted) {
+          setGatewayStatusError(error instanceof Error ? error.message : "读取智能网关状态失败");
+        }
+      } finally {
+        if (!aborted) {
+          setGatewayStatusLoading(false);
+        }
+      }
+    }
+
+    loadGatewayStatus();
+
+    return () => {
+      aborted = true;
+    };
+  }, [selectedProvider?.id, selectedProviderIsManaged]);
 
   function handleAutoFillDefaults() {
     setDefaults(buildRecommendedDefaults(models));
@@ -503,6 +596,69 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
       toast.error(error instanceof Error ? error.message : "切换历史服务失败");
     } finally {
       setSwitchingProviderId(null);
+    }
+  }
+
+  async function handleRefreshGatewayModels() {
+    if (!selectedProviderIsManaged) return;
+
+    setLoading("refreshGateway");
+    try {
+      const response = await fetch("/api/gateway/models", {
+        method: "POST",
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.error?.message ?? "刷新智能网关模型失败");
+      }
+
+      const nextProviders = await fetchSavedProviders();
+      const nextProviderId =
+        nextProviders.find((item) => isManagedGatewayProvider(item))?.id ?? selectedProviderId;
+      hydrateFromSavedProviders(nextProviders, nextProviderId);
+      setGatewayStatus((current) =>
+        current
+          ? {
+              ...current,
+              connected: true,
+              models: payload.data?.models ?? current.models,
+            }
+          : current,
+      );
+      toast.success(`已刷新 ${payload.data?.models?.length ?? 0} 个模型`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "刷新智能网关模型失败");
+    } finally {
+      setLoading(null);
+    }
+  }
+
+  async function handleSaveDefaults() {
+    if (!selectedProvider?.id) return;
+
+    setLoading("saveDefaults");
+    try {
+      const response = await fetch("/api/providers", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          providerId: selectedProvider.id,
+          defaultAssignments: defaults,
+        }),
+      });
+      const payload = await response.json();
+
+      if (!response.ok || !payload.success) {
+        throw new Error(payload.error?.message ?? "保存默认模型失败");
+      }
+
+      hydrateFromSavedProviders(payload.data ?? [], selectedProvider.id);
+      toast.success("默认模型选择已保存");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "保存默认模型失败");
+    } finally {
+      setLoading(null);
     }
   }
 
@@ -584,7 +740,7 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
       <Card>
         <CardHeader>
           <CardTitle>模型服务连接</CardTitle>
-          <CardDescription>读取已保存服务、测试连接、重新发现模型，并保存当前配置。</CardDescription>
+          <CardDescription>当前账号独立保存服务、Key 和默认模型，不会影响其他登录用户。</CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
           <div className="space-y-3 rounded-3xl border border-border bg-muted/40 p-4">
@@ -637,13 +793,15 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
                 <div className="flex flex-wrap items-center gap-2">
                   <p className="font-medium">{selectedProvider.name}</p>
                   {selectedProvider.isActive ? <Badge variant="success">当前服务</Badge> : null}
+                  {selectedProviderIsManaged ? <Badge variant="success">自动 Key 托管</Badge> : null}
+                  {unavailableModelCount > 0 ? <Badge variant="destructive">{unavailableModelCount} 个不可用</Badge> : null}
                 </div>
                 <p className="mt-2 text-sm text-muted-foreground">{selectedProvider.baseUrl}</p>
                 <p className="mt-1 text-xs text-muted-foreground">Key：{selectedProvider.maskedApiKey || "未显示"}</p>
                 <p className="mt-1 text-xs text-muted-foreground">最近更新：{formatTimeLabel(selectedProvider.updatedAt)}</p>
                 {selectedProviderIsManaged ? (
                   <p className="mt-2 text-xs text-muted-foreground">
-                    此服务由当前账号自动维护，模型列表会随账号权限同步。
+                    此服务由当前登录账号自动维护，刷新模型会同步 SubRouter 当前账号权限，并保留仍然存在的默认模型选择。
                   </p>
                 ) : null}
               </div>
@@ -653,6 +811,48 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
               </div>
             )}
           </div>
+
+          {selectedProviderIsManaged ? (
+            <div className="rounded-3xl border border-emerald-200 bg-emerald-50/70 p-4 dark:border-emerald-500/20 dark:bg-emerald-500/10">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <KeyRound className="h-4 w-4 text-emerald-700 dark:text-emerald-300" />
+                    <h3 className="font-medium text-emerald-950 dark:text-emerald-100">SubRouter 托管账号</h3>
+                  </div>
+                  <p className="text-sm text-emerald-800 dark:text-emerald-200">
+                    {gatewayStatusLoading
+                      ? "正在读取当前账号状态..."
+                      : gatewayStatus?.account?.displayName || gatewayStatus?.account?.username || gatewayStatus?.account?.email || "已绑定当前登录账号"}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant={gatewayStatus?.connected !== false ? "success" : "warning"}>
+                    {gatewayStatus?.connected !== false ? "网关已连接" : "网关未连接"}
+                  </Badge>
+                  <Badge variant={gatewayStatus?.account?.apiKeyReady !== false ? "success" : "warning"}>
+                    {gatewayStatus?.account?.apiKeyReady !== false ? "自动 Key 就绪" : "Key 未就绪"}
+                  </Badge>
+                  <Badge variant="outline">{gatewayStatus?.models?.length ?? models.length} 个网关模型</Badge>
+                </div>
+              </div>
+              {gatewayStatusError ? (
+                <div className="mt-3 rounded-2xl border border-rose-200 bg-white/80 px-3 py-2 text-sm text-rose-700 dark:border-rose-500/20 dark:bg-black/20 dark:text-rose-300">
+                  {gatewayStatusError}
+                </div>
+              ) : null}
+              <div className="mt-4 flex flex-wrap gap-3">
+                <Button type="button" variant="secondary" onClick={handleRefreshGatewayModels} disabled={loading !== null}>
+                  {loading === "refreshGateway" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                  刷新 SubRouter 模型
+                </Button>
+                <Button type="button" onClick={handleSaveDefaults} disabled={loading !== null || models.length === 0 || !selectedProvider?.id}>
+                  {loading === "saveDefaults" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                  保存默认模型
+                </Button>
+              </div>
+            </div>
+          ) : null}
 
           <form autoComplete="off" className="grid gap-4 md:grid-cols-2" onSubmit={(event) => event.preventDefault()}>
             <div className="space-y-2 md:col-span-2">
@@ -731,6 +931,12 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
               {loading === "saveAsNew" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CopyPlus className="mr-2 h-4 w-4" />}
               另存为新服务
             </Button>
+            {!selectedProviderIsManaged ? (
+              <Button type="button" variant="outline" onClick={handleSaveDefaults} disabled={loading !== null || models.length === 0 || !selectedProvider?.id}>
+                {loading === "saveDefaults" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
+                仅保存默认模型
+              </Button>
+            ) : null}
           </div>
 
           {models.length > 0 ? (
@@ -739,10 +945,18 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
                 <div className="flex flex-wrap items-center gap-2">
                   <h3 className="font-medium">默认模型类型分配</h3>
                   <Badge>{models.length} 个模型</Badge>
+                  <Badge variant={selectedDefaultCount >= 2 ? "success" : "warning"}>{selectedDefaultCount} 项已选择</Badge>
                 </div>
                 <Button type="button" variant="outline" size="sm" onClick={handleAutoFillDefaults}>
                   按能力自动填充
                 </Button>
+              </div>
+
+              <div className="grid gap-2 text-xs text-muted-foreground sm:grid-cols-4">
+                <div className="rounded-2xl border border-border bg-background px-3 py-2 dark:bg-black/20">文本：{modelSummary.text}</div>
+                <div className="rounded-2xl border border-border bg-background px-3 py-2 dark:bg-black/20">识图：{modelSummary.vision}</div>
+                <div className="rounded-2xl border border-border bg-background px-3 py-2 dark:bg-black/20">生图：{modelSummary.imageGeneration}</div>
+                <div className="rounded-2xl border border-border bg-background px-3 py-2 dark:bg-black/20">修图：{modelSummary.imageEdit}</div>
               </div>
 
               {availableImageModels.length === 0 ? (
@@ -791,7 +1005,7 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
         <CardContent className="space-y-4">
           {models.length === 0 ? (
             <div className="rounded-3xl border border-dashed border-border p-6 text-sm text-muted-foreground">
-              先测试并发现模型，系统会在这里按能力类型展示可用模型。
+              {selectedProviderIsManaged ? "点击左侧“刷新 SubRouter 模型”后，系统会在这里展示当前账号可用的模型。" : "先测试并发现模型，系统会在这里按能力类型展示可用模型。"}
             </div>
           ) : (
             <div className="grid gap-4">
@@ -813,7 +1027,12 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
 
                     <div className="mt-4 flex flex-wrap gap-2">
                       {visibleModels.map((model) => (
-                        <Badge key={group.key + "-" + model.modelId} variant="outline" className="max-w-full truncate">
+                        <Badge
+                          key={group.key + "-" + model.modelId}
+                          variant={model.isAvailable === false ? "destructive" : "outline"}
+                          className="max-w-full truncate"
+                          title={model.endpointSupport?.note ?? undefined}
+                        >
                           {model.label}
                         </Badge>
                       ))}

@@ -105,6 +105,22 @@ function normalizeHost(value?: string | null) {
   }
 }
 
+function gatewayIdentityScope(login: Pick<GatewayLoginResult, "provider" | "baseUrl" | "distHost">) {
+  return [
+    login.provider,
+    normalizeBaseUrl(login.baseUrl),
+    normalizeHost(login.distHost) || "main",
+  ].join("|");
+}
+
+function scopedExternalUserId(login: GatewayLoginResult, externalUserId: string) {
+  return `${gatewayIdentityScope(login)}|${externalUserId}`;
+}
+
+function gatewayProviderName(account: Pick<StoredGatewayAccount, "distHost">) {
+  return account.distHost ? `${DEFAULT_PROVIDER_NAME} / ${account.distHost}` : DEFAULT_PROVIDER_NAME;
+}
+
 function distContextHeaders(config: { distHost?: string | null }): Record<string, string> {
   const host = normalizeHost(config.distHost);
   if (!host) return {};
@@ -570,27 +586,57 @@ async function fetchGatewayBModels(account: StoredGatewayAccount): Promise<Gatew
 
 async function upsertAppUser(login: GatewayLoginResult) {
   const externalProvider = login.provider;
-  const externalUserId = login.externalUserId || login.email || login.username;
+  const legacyExternalUserId = login.externalUserId || login.email || login.username;
+  const externalUserId = legacyExternalUserId ? scopedExternalUserId(login, legacyExternalUserId) : "";
+  const userData = {
+    username: login.username ?? null,
+    email: login.email ?? null,
+    displayName: login.displayName ?? login.username ?? login.email ?? null,
+  };
 
   if (externalUserId) {
-    return prisma.appUser.upsert({
+    const scopedUser = await prisma.appUser.findUnique({
       where: {
         externalProvider_externalUserId: {
           externalProvider,
           externalUserId,
         },
       },
-      update: {
-        username: login.username ?? null,
-        email: login.email ?? null,
-        displayName: login.displayName ?? login.username ?? login.email ?? null,
-      },
-      create: {
+    });
+
+    if (scopedUser) {
+      return prisma.appUser.update({
+        where: { id: scopedUser.id },
+        data: userData,
+      });
+    }
+
+    if (legacyExternalUserId && legacyExternalUserId !== externalUserId) {
+      const legacyUser = await prisma.appUser.findUnique({
+        where: {
+          externalProvider_externalUserId: {
+            externalProvider,
+            externalUserId: legacyExternalUserId,
+          },
+        },
+      });
+
+      if (legacyUser) {
+        return prisma.appUser.update({
+          where: { id: legacyUser.id },
+          data: {
+            ...userData,
+            externalUserId,
+          },
+        });
+      }
+    }
+
+    return prisma.appUser.create({
+      data: {
         externalProvider,
         externalUserId,
-        username: login.username ?? null,
-        email: login.email ?? null,
-        displayName: login.displayName ?? login.username ?? login.email ?? null,
+        ...userData,
       },
     });
   }
@@ -598,11 +644,128 @@ async function upsertAppUser(login: GatewayLoginResult) {
   return prisma.appUser.create({
     data: {
       externalProvider,
-      username: login.username ?? null,
-      email: login.email ?? null,
-      displayName: login.displayName ?? login.username ?? login.email ?? null,
+      ...userData,
     },
   });
+}
+
+async function claimLegacyWorkspaceForUser(userId: string) {
+  await prisma.$transaction(async (tx) => {
+    const [ownedProjects, ownedProviders] = await Promise.all([
+      tx.project.count({
+        where: {
+          userId: {
+            not: null,
+          },
+        },
+      }),
+      tx.providerConfig.count({
+        where: {
+          userId: {
+            not: null,
+          },
+        },
+      }),
+    ]);
+
+    if (ownedProjects + ownedProviders > 0) {
+      return;
+    }
+
+    await Promise.all([
+      tx.project.updateMany({
+        where: { userId: null },
+        data: { userId },
+      }),
+      tx.providerConfig.updateMany({
+        where: { userId: null },
+        data: { userId },
+      }),
+    ]);
+  });
+}
+
+async function updateExistingGatewayAccount(account: StoredGatewayAccount) {
+  const existing = await prisma.gatewayAccount.findFirst({
+    where: {
+      userId: account.userId,
+      provider: account.provider,
+      baseUrl: account.baseUrl,
+      distHost: account.distHost ?? null,
+    },
+  });
+
+  const data = {
+    distHost: account.distHost ?? null,
+    externalUserId: account.externalUserId ?? null,
+    username: account.username ?? null,
+    email: account.email ?? null,
+    displayName: account.displayName ?? null,
+    sessionCookieEncrypted: encryptNullable(account.sessionCookie),
+    accessTokenEncrypted: encryptNullable(account.accessToken),
+    refreshTokenEncrypted: encryptNullable(account.refreshToken),
+    apiKeyEncrypted: encryptNullable(account.apiKey),
+    apiKeyId: account.apiKeyId ?? null,
+    modelsSnapshot: (account.modelsSnapshot ?? Prisma.JsonNull) as Prisma.InputJsonValue,
+  };
+
+  if (existing) {
+    return prisma.gatewayAccount.update({
+      where: { id: existing.id },
+      data,
+    });
+  }
+
+  return prisma.gatewayAccount.create({
+    data: {
+      userId: account.userId,
+      provider: account.provider,
+      baseUrl: account.baseUrl,
+      ...data,
+    },
+  });
+}
+
+async function saveGatewayAccount(account: StoredGatewayAccount) {
+  try {
+    return await updateExistingGatewayAccount(account);
+  } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2002"
+    ) {
+      const legacy = await prisma.gatewayAccount.findFirst({
+        where: {
+          userId: account.userId,
+          provider: account.provider,
+          baseUrl: account.baseUrl,
+        },
+        orderBy: { updatedAt: "desc" },
+      });
+
+      if (legacy) {
+        await prisma.gatewayAccount.update({
+          where: { id: legacy.id },
+          data: {
+            distHost: account.distHost ?? null,
+            externalUserId: account.externalUserId ?? null,
+            username: account.username ?? null,
+            email: account.email ?? null,
+            displayName: account.displayName ?? null,
+            sessionCookieEncrypted: encryptNullable(account.sessionCookie),
+            accessTokenEncrypted: encryptNullable(account.accessToken),
+            refreshTokenEncrypted: encryptNullable(account.refreshToken),
+            apiKeyEncrypted: encryptNullable(account.apiKey),
+            apiKeyId: account.apiKeyId ?? null,
+            modelsSnapshot: (account.modelsSnapshot ?? Prisma.JsonNull) as Prisma.InputJsonValue,
+          },
+        });
+        return legacy;
+      }
+    }
+
+    throw error;
+  }
 }
 
 function hydrateStoredAccount(row: Awaited<ReturnType<typeof prisma.gatewayAccount.findFirst>>) {
@@ -624,47 +787,6 @@ function hydrateStoredAccount(row: Awaited<ReturnType<typeof prisma.gatewayAccou
     apiKeyId: row.apiKeyId ?? undefined,
     modelsSnapshot: row.modelsSnapshot,
   } satisfies StoredGatewayAccount;
-}
-
-async function saveGatewayAccount(account: StoredGatewayAccount) {
-  return prisma.gatewayAccount.upsert({
-    where: {
-      userId_provider_baseUrl: {
-        userId: account.userId,
-        provider: account.provider,
-        baseUrl: account.baseUrl,
-      },
-    },
-    update: {
-      distHost: account.distHost ?? null,
-      externalUserId: account.externalUserId ?? null,
-      username: account.username ?? null,
-      email: account.email ?? null,
-      displayName: account.displayName ?? null,
-      sessionCookieEncrypted: encryptNullable(account.sessionCookie),
-      accessTokenEncrypted: encryptNullable(account.accessToken),
-      refreshTokenEncrypted: encryptNullable(account.refreshToken),
-      apiKeyEncrypted: encryptNullable(account.apiKey),
-      apiKeyId: account.apiKeyId ?? null,
-      modelsSnapshot: (account.modelsSnapshot ?? Prisma.JsonNull) as Prisma.InputJsonValue,
-    },
-    create: {
-      userId: account.userId,
-      provider: account.provider,
-      baseUrl: account.baseUrl,
-      distHost: account.distHost ?? null,
-      externalUserId: account.externalUserId ?? null,
-      username: account.username ?? null,
-      email: account.email ?? null,
-      displayName: account.displayName ?? null,
-      sessionCookieEncrypted: encryptNullable(account.sessionCookie),
-      accessTokenEncrypted: encryptNullable(account.accessToken),
-      refreshTokenEncrypted: encryptNullable(account.refreshToken),
-      apiKeyEncrypted: encryptNullable(account.apiKey),
-      apiKeyId: account.apiKeyId ?? null,
-      modelsSnapshot: (account.modelsSnapshot ?? Prisma.JsonNull) as Prisma.InputJsonValue,
-    },
-  });
 }
 
 function scoreTextModel(modelId: string) {
@@ -708,7 +830,8 @@ function chooseDefaults(models: ReturnType<typeof normalizeDetectedModels>) {
 
 async function upsertUserProviderFromGateway(account: StoredGatewayAccount, models: GatewayModel[]) {
   const normalizedModels = normalizeDetectedModels(models);
-  const defaults = chooseDefaults(normalizedModels);
+  const recommendedDefaults = chooseDefaults(normalizedModels);
+  const providerName = gatewayProviderName(account);
 
   await prisma.providerConfig.updateMany({
     where: {
@@ -723,15 +846,32 @@ async function upsertUserProviderFromGateway(account: StoredGatewayAccount, mode
   const existing = await prisma.providerConfig.findFirst({
     where: {
       userId: account.userId,
-      name: DEFAULT_PROVIDER_NAME,
+      name: providerName,
       baseUrl: gatewayBase(account.baseUrl),
     },
+    include: { models: true },
   });
+
+  const modelIds = new Set(normalizedModels.map((model) => model.modelId));
+  const existingDefaults = existing
+    ? {
+        analysisModelId: existing.models.find((model) => model.isDefaultAnalysis && modelIds.has(model.modelId))?.modelId,
+        planningModelId: existing.models.find((model) => model.isDefaultPlanning && modelIds.has(model.modelId))?.modelId,
+        heroImageModelId: existing.models.find((model) => model.isDefaultHeroImage && modelIds.has(model.modelId))?.modelId,
+        detailImageModelId: existing.models.find((model) => model.isDefaultDetailImage && modelIds.has(model.modelId))?.modelId,
+        imageEditModelId: existing.models.find((model) => model.isDefaultImageEdit && modelIds.has(model.modelId))?.modelId,
+      }
+    : {};
+  const defaults = {
+    ...recommendedDefaults,
+    ...Object.fromEntries(Object.entries(existingDefaults).filter(([, value]) => Boolean(value))),
+  };
 
   const provider = existing
     ? await prisma.providerConfig.update({
         where: { id: existing.id },
         data: {
+          name: providerName,
           apiKeyEncrypted: encryptSecret(account.apiKey || ""),
           isActive: true,
         },
@@ -739,7 +879,7 @@ async function upsertUserProviderFromGateway(account: StoredGatewayAccount, mode
     : await prisma.providerConfig.create({
         data: {
           userId: account.userId,
-          name: DEFAULT_PROVIDER_NAME,
+          name: providerName,
           baseUrl: gatewayBase(account.baseUrl),
           apiKeyEncrypted: encryptSecret(account.apiKey || ""),
           isActive: true,
@@ -1076,6 +1216,7 @@ function needsDistSiteAddress(error: unknown) {
 
 async function completeGatewayLogin(login: GatewayLoginResult) {
   const user = await upsertAppUser(login);
+  await claimLegacyWorkspaceForUser(user.id);
   const account: StoredGatewayAccount = {
     ...login,
     userId: user.id,

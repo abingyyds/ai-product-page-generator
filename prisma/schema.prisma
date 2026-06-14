@@ -99,7 +99,7 @@ model GatewayAccount {
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 
-  @@unique([userId, provider, baseUrl])
+  @@index([userId, provider, baseUrl, distHost])
   @@index([userId, updatedAt])
 }
 

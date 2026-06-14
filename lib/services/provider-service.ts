@@ -96,7 +96,7 @@ function maskApiKey(apiKey: string) {
 }
 
 function isManagedGatewayProvider(provider: { name?: string | null }) {
-  return provider.name === "智能网关";
+  return provider.name === "智能网关" || String(provider.name ?? "").startsWith("智能网关 / ");
 }
 
 function serializeProviderForClient<T extends { name: string; baseUrl: string; apiKey: string; maskedApiKey: string }>(
@@ -438,6 +438,61 @@ export async function activateProviderConfig(providerId: string) {
       data: { isActive: true },
     }),
   ]);
+
+  return getAllProviderConfigs();
+}
+
+export async function updateProviderDefaultModels(
+  providerId: string,
+  defaults: {
+    analysisModelId?: string | null;
+    planningModelId?: string | null;
+    heroImageModelId?: string | null;
+    detailImageModelId?: string | null;
+    imageEditModelId?: string | null;
+  },
+) {
+  const user = await requireCurrentUser();
+  const provider = await prisma.providerConfig.findUnique({
+    where: { id: providerId, userId: user.id },
+    select: { id: true },
+  });
+
+  if (!provider) {
+    throw new Error("未找到要保存的模型服务配置。");
+  }
+
+  await prisma.modelProfile.updateMany({
+    where: { providerConfigId: providerId },
+    data: {
+      isDefaultAnalysis: false,
+      isDefaultPlanning: false,
+      isDefaultHeroImage: false,
+      isDefaultDetailImage: false,
+      isDefaultImageEdit: false,
+    },
+  });
+
+  const updates = [
+    ["isDefaultAnalysis", defaults.analysisModelId],
+    ["isDefaultPlanning", defaults.planningModelId],
+    ["isDefaultHeroImage", defaults.heroImageModelId],
+    ["isDefaultDetailImage", defaults.detailImageModelId],
+    ["isDefaultImageEdit", defaults.imageEditModelId],
+  ] as const;
+
+  for (const [field, modelId] of updates) {
+    if (!modelId) continue;
+    await prisma.modelProfile.updateMany({
+      where: { providerConfigId: providerId, modelId },
+      data: { [field]: true },
+    });
+  }
+
+  await prisma.providerConfig.update({
+    where: { id: providerId, userId: user.id },
+    data: { updatedAt: new Date() },
+  });
 
   return getAllProviderConfigs();
 }
