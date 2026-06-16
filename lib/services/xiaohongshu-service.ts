@@ -522,7 +522,7 @@ export async function planXiaohongshuPost(input: XiaohongshuPlanInput) {
   return normalizeXiaohongshuPlan(result.parsed, topic);
 }
 
-export async function generateXiaohongshuImages(plan: XiaohongshuPlan, referenceImages: string[] = []) {
+export async function generateXiaohongshuImages(plan: XiaohongshuPlan, _referenceImages: string[] = []) {
   const { provider, adapter } = await getProviderAdapter();
   const models = getImageGenerationModels(provider);
 
@@ -536,7 +536,6 @@ export async function generateXiaohongshuImages(plan: XiaohongshuPlan, reference
           model,
           prompt,
           aspectRatio: "3:4",
-          referenceImages,
           monitor: {
             operation: "xiaohongshu_image_generate",
           },
