@@ -236,7 +236,10 @@ async function readChatCompletionStream(response: Response) {
       return;
     }
 
-    const payload = JSON.parse(data);
+    const payload = tryParseJsonValue(data);
+    if (payload === null) {
+      throw new Error(`Provider streaming response returned non-JSON chunk: ${data.slice(0, 1000)}`);
+    }
     if (payload?.usage) {
       usage = payload.usage;
     }
@@ -308,6 +311,24 @@ function tryParseJsonBody(body: RequestInit["body"]) {
   } catch {
     return null;
   }
+}
+
+function tryParseJsonValue(value: string) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
+
+function parseProviderJson<T>(body: string, context: string): T {
+  const parsed = tryParseJsonValue(body);
+  if (parsed === null) {
+    const detail = body.trim() || "empty response body";
+    throw new Error(`${context} returned non-JSON response: ${detail.slice(0, 1000)}`);
+  }
+
+  return parsed as T;
 }
 
 function tryReadBodyModel(body: RequestInit["body"]) {
@@ -718,7 +739,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       throw new Error(`Provider request failed (${response.status}): ${response.body}`);
     }
 
-    return JSON.parse(response.body) as T;
+    return parseProviderJson<T>(response.body, `Provider ${path}`);
   }
 
   private async requestChatCompletion<T>(
@@ -849,7 +870,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       throw new Error(`Provider request failed (${response.status}): ${response.body}`);
     }
 
-    return JSON.parse(response.body) as T;
+    return parseProviderJson<T>(response.body, `Provider multipart ${path}`);
   }
 
   private async requestGoogleJson<T>(path: string, body: unknown, timeoutMs = DEFAULT_PROVIDER_TIMEOUT_MS, monitor?: AiMonitorContext) {
@@ -946,7 +967,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         errorMessage: null,
       });
 
-      return JSON.parse(finalSuccess.body) as T;
+      return parseProviderJson<T>(finalSuccess.body, "Google protocol request");
     }
 
     const errorSummary = collapsedAttempts

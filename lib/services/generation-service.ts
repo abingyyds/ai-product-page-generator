@@ -226,7 +226,7 @@ function shouldFallbackToNextImageModel(error: unknown) {
     return false;
   }
 
-  return /404|405|no available endpoint|unsupported|not implemented|does not exist|invalid_value|unknown parameter|invalid type|supported values|invalid value.+size/i.test(
+  return /404|405|no available endpoint|unsupported|not implemented|does not exist|invalid_value|unknown parameter|invalid type|supported values|invalid value.+size|upstream error|non-JSON response/i.test(
     error.message,
   );
 }
@@ -245,6 +245,9 @@ function summarizeProviderImageFailure(detail: string, mode: "generate" | "edit"
   }
   if (/unknown parameter|invalid type|images\[0\]|supported values|invalid value.+size/i.test(detail)) {
     reasons.push("代理商图片接口的兼容格式与当前网关实现不一致");
+  }
+  if (/upstream error|non-JSON response/i.test(detail)) {
+    reasons.push("代理商上游返回了非 JSON 错误响应");
   }
 
   if (!reasons.length) {
