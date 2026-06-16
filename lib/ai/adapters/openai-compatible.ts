@@ -15,6 +15,8 @@ import { inferCategory, logApiUsage } from "@/lib/monitor/api-usage";
 const DEFAULT_PROVIDER_TIMEOUT_MS = readTimeoutEnv("AI_PROVIDER_TIMEOUT_MS", 60000);
 const DEFAULT_TEXT_REQUEST_TIMEOUT_MS = readTimeoutEnv("AI_TEXT_TIMEOUT_MS", 300000);
 const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS = readTimeoutEnv("AI_IMAGE_TIMEOUT_MS", 300000);
+const DEFAULT_IMAGE_QUALITY = normalizeImageQuality(process.env.AI_IMAGE_QUALITY ?? "1024");
+const IMAGE_RESPONSE_FORMAT = process.env.AI_IMAGE_RESPONSE_FORMAT === "b64_json" ? "b64_json" : "url";
 
 type RawProviderResponse = {
   ok: boolean;
@@ -26,6 +28,13 @@ type RawProviderResponse = {
 function readTimeoutEnv(name: string, fallback: number) {
   const value = Number(process.env[name]);
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function normalizeImageQuality(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (["2048", "2k"].includes(normalized)) return "2048" as const;
+  if (["4096", "4k"].includes(normalized)) return "4096" as const;
+  return "1024" as const;
 }
 
 function normalizeBaseUrl(baseUrl: string) {
@@ -105,8 +114,16 @@ function resolveAspectRatio(input: { aspectRatio?: "1:1" | "3:4" | "9:16"; size?
 }
 
 function resolveOpenAiSize(input: { aspectRatio?: "1:1" | "3:4" | "9:16"; size?: string }) {
-  if (input.size) {
+  if (input.size && /^(1024|2048|4096)x(1024|1536|1792|2048|4096)$/.test(input.size)) {
     return input.size;
+  }
+
+  if (DEFAULT_IMAGE_QUALITY === "2048") {
+    return "2048x2048";
+  }
+
+  if (DEFAULT_IMAGE_QUALITY === "4096") {
+    return "4096x4096";
   }
 
   if (input.aspectRatio === "1:1") {
@@ -122,6 +139,20 @@ function resolveOpenAiSize(input: { aspectRatio?: "1:1" | "3:4" | "9:16"; size?:
   }
 
   return "1024x1536";
+}
+
+function buildOfficialImageGenerationBody(input: {
+  model: string;
+  prompt: string;
+  size?: string;
+  aspectRatio?: "1:1" | "3:4" | "9:16";
+}) {
+  return {
+    model: input.model,
+    prompt: input.prompt,
+    size: resolveOpenAiSize(input),
+    response_format: IMAGE_RESPONSE_FORMAT,
+  };
 }
 
 function dataUrlToInlineData(dataUrl: string) {
@@ -448,18 +479,6 @@ function extractGoogleImageResult(payload: any): ImageGenerationResult {
   }
 
   throw new Error("Google image generation returned no inline image data.");
-}
-
-function toImageRefs(images: string[]) {
-  return images.map((imageUrl) => ({
-    image_url: imageUrl,
-  }));
-}
-
-function toMaskRef(mask: string) {
-  return {
-    image_url: mask,
-  };
 }
 
 function classifyProbeResult(status: number, body: string) {
@@ -1283,26 +1302,18 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       model: input.model,
       prompt: input.prompt,
       size: resolveOpenAiSize(input),
+      response_format: IMAGE_RESPONSE_FORMAT,
     };
-    const errors: string[] = [];
 
-    for (const imageFieldName of ["image[]", "image"] as const) {
-      try {
-        const payload = await this.requestMultipartJson<{
-          data?: Array<{ url?: string; b64_json?: string; revised_prompt?: string }>;
-        }>("/images/edits", fields, input.images, {
-          imageFieldName,
-          timeoutMs: DEFAULT_IMAGE_REQUEST_TIMEOUT_MS,
-          monitor: input.monitor,
-        });
+    const payload = await this.requestMultipartJson<{
+      data?: Array<{ url?: string; b64_json?: string; revised_prompt?: string }>;
+    }>("/images/edits", fields, input.images, {
+      imageFieldName: "image",
+      timeoutMs: DEFAULT_IMAGE_REQUEST_TIMEOUT_MS,
+      monitor: input.monitor,
+    });
 
-        return extractImageResult(payload);
-      } catch (error) {
-        errors.push(error instanceof Error ? error.message : "Unknown GPT Image multipart error");
-      }
-    }
-
-    throw new Error(`GPT Image multipart request failed: ${errors.join(" | ")}`);
+    return extractImageResult(payload);
   }
 
   async generateImage(input: ImageGenerationRequest): Promise<ImageGenerationResult> {
@@ -1348,61 +1359,6 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         }
       }
 
-      const imageRefs = toImageRefs(referenceImages);
-
-      for (const attempt of [
-        {
-          path: "/images/edits",
-          body: {
-            model: input.model,
-            prompt: input.prompt,
-            size: resolveOpenAiSize(input),
-            images: imageRefs,
-          },
-        },
-        {
-          path: "/images/edits",
-          body: {
-            model: input.model,
-            prompt: input.prompt,
-            size: resolveOpenAiSize(input),
-            images: imageRefs,
-            input_fidelity: "high",
-          },
-        },
-        {
-          path: "/images/generations",
-          body: {
-            model: input.model,
-            prompt: input.prompt,
-            size: resolveOpenAiSize(input),
-            reference_images: imageRefs,
-          },
-        },
-        {
-          path: "/images/generations",
-          body: {
-            model: input.model,
-            prompt: input.prompt,
-            size: resolveOpenAiSize(input),
-            input_images: imageRefs,
-          },
-        },
-      ]) {
-        try {
-          const payload = await this.requestJson<{
-            data?: Array<{ url?: string; b64_json?: string; revised_prompt?: string }>;
-          }>(attempt.path, {
-            method: "POST",
-            body: JSON.stringify(attempt.body),
-          }, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS, input.monitor);
-
-          return extractImageResult(payload);
-        } catch (error) {
-          referenceErrors.push(error instanceof Error ? error.message : "Unknown reference image generation error");
-        }
-      }
-
       throw new Error(`Reference-guided image generation failed: ${referenceErrors.join(" | ")}`);
     }
 
@@ -1411,11 +1367,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         data?: Array<{ url?: string; b64_json?: string; revised_prompt?: string }>;
       }>("/images/generations", {
         method: "POST",
-        body: JSON.stringify({
-          model: input.model,
-          prompt: input.prompt,
-          size: resolveOpenAiSize(input),
-        }),
+        body: JSON.stringify(buildOfficialImageGenerationBody(input)),
       }, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS, input.monitor);
 
       return extractImageResult(payload);
@@ -1435,7 +1387,6 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   }
 
   async editImage(input: ImageEditRequest): Promise<ImageGenerationResult> {
-    const imageRefs = toImageRefs([input.image, ...(input.referenceImages ?? [])]);
     let googleProtocolError: unknown = null;
     if (isGeminiImageModel(input.model)) {
       try {
@@ -1455,80 +1406,25 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     }
 
     if (isOpenAiGptImageModel(input.model)) {
-      try {
-        return await this.generateOpenAiGptImageWithReferences({
-          model: input.model,
-          prompt: input.prompt,
-          images: [input.image, ...(input.referenceImages ?? [])],
-          size: input.size,
-          aspectRatio: input.aspectRatio,
-          monitor: input.monitor,
-        });
-      } catch {
-        // Fall through to JSON compatibility attempts for third-party gateways.
-      }
-    }
-
-    const attempts = [
-      {
-        path: "/images/edits",
-        body: {
-          model: input.model,
-          prompt: input.prompt,
-          size: resolveOpenAiSize(input),
-          images: imageRefs,
-          ...(input.mask ? { mask: toMaskRef(input.mask) } : {}),
-        },
-      },
-      {
-        path: "/images/edits",
-        body: {
-          model: input.model,
-          prompt: input.prompt,
-          size: resolveOpenAiSize(input),
-          images: imageRefs,
-          input_fidelity: "high",
-          ...(input.mask ? { mask: toMaskRef(input.mask) } : {}),
-        },
-      },
-      {
-        path: "/images/generations",
-        body: {
-          model: input.model,
-          prompt: input.prompt,
-          size: resolveOpenAiSize(input),
-          reference_images: imageRefs,
-          ...(input.mask ? { mask: toMaskRef(input.mask) } : {}),
-        },
-      },
-    ];
-
-    const errors: string[] = [];
-
-    for (const attempt of attempts) {
-      try {
-        const payload = await this.requestJson<{
-          data?: Array<{ url?: string; b64_json?: string; revised_prompt?: string }>;
-        }>(attempt.path, {
-          method: "POST",
-          body: JSON.stringify(attempt.body),
-        }, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS, input.monitor);
-
-        return extractImageResult(payload);
-      } catch (error) {
-        errors.push(error instanceof Error ? error.message : "Unknown image edit error");
-      }
+      return this.generateOpenAiGptImageWithReferences({
+        model: input.model,
+        prompt: input.prompt,
+        images: [input.image, ...(input.referenceImages ?? [])],
+        size: input.size,
+        aspectRatio: input.aspectRatio,
+        monitor: input.monitor,
+      });
     }
 
     if (isGeminiImageModel(input.model)) {
-      errors.unshift(
+      throw new Error(
         googleProtocolError instanceof Error
           ? `Google protocol image edit failed: ${googleProtocolError.message}`
           : "Google protocol image edit attempt did not complete successfully",
       );
     }
 
-    throw new Error(`Base64 image edit failed: ${errors.join(" | ")}`);
+    throw new Error("Image edit failed: official /images/edits multipart request did not complete.");
   }
 }
 
