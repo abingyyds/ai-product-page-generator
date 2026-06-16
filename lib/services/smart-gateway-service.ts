@@ -1344,3 +1344,27 @@ export async function refreshGatewayModelsForUser(userId: string) {
   await upsertUserProviderFromGateway(account, models);
   return models;
 }
+
+export async function ensureGatewayProviderForUser(userId: string) {
+  const account = await getLatestGatewayAccount(userId);
+  if (!account?.apiKey) {
+    return null;
+  }
+
+  const cachedModels = Array.isArray(account.modelsSnapshot)
+    ? (account.modelsSnapshot as GatewayModel[])
+    : [];
+
+  if (cachedModels.length > 0) {
+    return upsertUserProviderFromGateway(account, cachedModels);
+  }
+
+  await refreshGatewayModelsForUser(userId);
+  const refreshedAccount = await getLatestGatewayAccount(userId);
+  const refreshedModels = Array.isArray(refreshedAccount?.modelsSnapshot)
+    ? (refreshedAccount.modelsSnapshot as GatewayModel[])
+    : [];
+  return refreshedModels.length > 0 && refreshedAccount
+    ? upsertUserProviderFromGateway(refreshedAccount, refreshedModels)
+    : null;
+}

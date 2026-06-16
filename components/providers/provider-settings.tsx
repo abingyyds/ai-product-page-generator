@@ -80,11 +80,11 @@ type ModelOptionGroup = {
   models: GenericModelRecord[];
 };
 
-const modelTypeFields: Array<{ key: ModelTypeKey; label: string }> = [
-  { key: "text", label: "文本生成模型" },
-  { key: "vision", label: "图像识别模型" },
-  { key: "image_gen", label: "图像生成模型" },
-  { key: "image_edit", label: "图像编辑模型" },
+const modelTypeFields: Array<{ key: ModelTypeKey; label: string; description: string }> = [
+  { key: "text", label: "文本 / 规划用什么模型", description: "用于页面规划、文案生成、小红书图文规划和 SVG 兜底文案。" },
+  { key: "vision", label: "识图 / 商品分析用什么模型", description: "用于读取商品图、参考图并生成商品分析。" },
+  { key: "image_gen", label: "生图用什么模型", description: "用于详情页头图、模块图和小红书图文生成。" },
+  { key: "image_edit", label: "修图 / 重绘用什么模型", description: "用于模块图重绘、增强和基于底图编辑。" },
 ];
 
 function buildDefaults(provider: ProviderRecord | null): DefaultAssignments {
@@ -654,7 +654,7 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
       }
 
       hydrateFromSavedProviders(payload.data ?? [], selectedProvider.id);
-      toast.success("默认模型选择已保存");
+      toast.success("模型选择已保存，后续生成会使用这些模型");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "保存默认模型失败");
     } finally {
@@ -844,11 +844,11 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
               <div className="mt-4 flex flex-wrap gap-3">
                 <Button type="button" variant="secondary" onClick={handleRefreshGatewayModels} disabled={loading !== null}>
                   {loading === "refreshGateway" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
-                  刷新 SubRouter 模型
+                  从智能路由读取模型
                 </Button>
                 <Button type="button" onClick={handleSaveDefaults} disabled={loading !== null || models.length === 0 || !selectedProvider?.id}>
                   {loading === "saveDefaults" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                  保存默认模型
+                  保存并启用这些模型
                 </Button>
               </div>
             </div>
@@ -934,7 +934,7 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
             {!selectedProviderIsManaged ? (
               <Button type="button" variant="outline" onClick={handleSaveDefaults} disabled={loading !== null || models.length === 0 || !selectedProvider?.id}>
                 {loading === "saveDefaults" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Save className="mr-2 h-4 w-4" />}
-                仅保存默认模型
+                保存并启用这些模型
               </Button>
             ) : null}
           </div>
@@ -943,7 +943,7 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
             <div className="space-y-4 rounded-3xl bg-muted/60 p-4">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex flex-wrap items-center gap-2">
-                  <h3 className="font-medium">默认模型类型分配</h3>
+                  <h3 className="font-medium">当前生成流程使用的模型</h3>
                   <Badge>{models.length} 个模型</Badge>
                   <Badge variant={selectedDefaultCount >= 2 ? "success" : "warning"}>{selectedDefaultCount} 项已选择</Badge>
                 </div>
@@ -972,7 +972,10 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
 
                   return (
                     <div key={field.key} className="space-y-2">
-                      <Label>{field.label}</Label>
+                      <div className="space-y-1">
+                        <Label>{field.label}</Label>
+                        <p className="text-xs leading-5 text-muted-foreground">{field.description}</p>
+                      </div>
                       <select
                         className="flex h-10 w-full rounded-xl border border-input bg-background px-3 text-sm text-foreground dark:bg-black/30"
                         value={selectedValue}
@@ -1005,7 +1008,7 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
         <CardContent className="space-y-4">
           {models.length === 0 ? (
             <div className="rounded-3xl border border-dashed border-border p-6 text-sm text-muted-foreground">
-              {selectedProviderIsManaged ? "点击左侧“刷新 SubRouter 模型”后，系统会在这里展示当前账号可用的模型。" : "先测试并发现模型，系统会在这里按能力类型展示可用模型。"}
+              {selectedProviderIsManaged ? "点击左侧“从智能路由读取模型”后，系统会在这里展示当前账号可用的模型。" : "先测试并发现模型，系统会在这里按能力类型展示可用模型。"}
             </div>
           ) : (
             <div className="grid gap-4">
