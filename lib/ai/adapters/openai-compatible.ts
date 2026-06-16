@@ -12,6 +12,22 @@ import type {
 } from "@/lib/ai/provider-client";
 import { inferCategory, logApiUsage } from "@/lib/monitor/api-usage";
 
+const DEFAULT_PROVIDER_TIMEOUT_MS = readTimeoutEnv("AI_PROVIDER_TIMEOUT_MS", 60000);
+const DEFAULT_TEXT_REQUEST_TIMEOUT_MS = readTimeoutEnv("AI_TEXT_TIMEOUT_MS", 300000);
+const DEFAULT_IMAGE_REQUEST_TIMEOUT_MS = readTimeoutEnv("AI_IMAGE_TIMEOUT_MS", 300000);
+
+type RawProviderResponse = {
+  ok: boolean;
+  status: number;
+  body: string;
+  durationMs: number;
+};
+
+function readTimeoutEnv(name: string, fallback: number) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
 function normalizeBaseUrl(baseUrl: string) {
   return baseUrl.replace(/\/+$/, "");
 }
@@ -146,6 +162,122 @@ function extractTextContent(payload: unknown) {
   return "";
 }
 
+function streamContentToText(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((entry) => {
+        if (typeof entry === "string") return entry;
+        if (entry && typeof entry === "object" && "text" in entry) {
+          return String((entry as { text?: unknown }).text ?? "");
+        }
+        return "";
+      })
+      .join("");
+  }
+
+  if (content && typeof content === "object" && "text" in content) {
+    return String((content as { text?: unknown }).text ?? "");
+  }
+
+  return "";
+}
+
+function appendStreamPayloadContent(payload: any, chunks: string[]) {
+  const choices = Array.isArray(payload?.choices) ? payload.choices : [];
+
+  for (const choice of choices) {
+    const deltaText = streamContentToText(choice?.delta?.content);
+    if (deltaText) {
+      chunks.push(deltaText);
+      continue;
+    }
+
+    const messageText = streamContentToText(choice?.message?.content);
+    if (messageText) {
+      chunks.push(messageText);
+      continue;
+    }
+
+    if (typeof choice?.text === "string") {
+      chunks.push(choice.text);
+    }
+  }
+}
+
+function parseSseBlock(block: string) {
+  const data = block
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart())
+    .join("\n")
+    .trim();
+
+  return data || null;
+}
+
+async function readChatCompletionStream(response: Response) {
+  if (!response.body) {
+    throw new Error("Provider returned an empty streaming response body.");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const chunks: string[] = [];
+  let usage: unknown = null;
+  let buffer = "";
+
+  function processBlock(block: string) {
+    const data = parseSseBlock(block);
+    if (!data || data === "[DONE]") {
+      return;
+    }
+
+    const payload = JSON.parse(data);
+    if (payload?.usage) {
+      usage = payload.usage;
+    }
+    appendStreamPayloadContent(payload, chunks);
+  }
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const blocks = buffer.split(/\r?\n\r?\n/);
+    buffer = blocks.pop() ?? "";
+
+    for (const block of blocks) {
+      processBlock(block);
+    }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    processBlock(buffer);
+  }
+
+  const content = chunks.join("");
+  if (!content.trim()) {
+    throw new Error("Provider streaming response did not include text content.");
+  }
+
+  return JSON.stringify({
+    choices: [
+      {
+        message: {
+          content,
+        },
+      },
+    ],
+    ...(usage ? { usage } : {}),
+  });
+}
+
 function parseJsonBlock(raw: string) {
   const direct = raw.trim();
   if (direct.startsWith("{") || direct.startsWith("[")) {
@@ -220,6 +352,24 @@ function isUnsupportedTemperatureError(error: unknown) {
   }
 
   return /temperature/i.test(error.message) && /unsupported|does not support|only the default|unsupported_value/i.test(error.message);
+}
+
+function shouldFallbackToNonStreaming(error: unknown) {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  if (/timed out|AbortError/i.test(error.message)) {
+    return false;
+  }
+
+  return /stream|streaming|event.?stream|sse|Provider streaming response did not include text content|empty streaming response body|Unexpected (?:end|token) .*JSON/i.test(
+    error.message,
+  );
+}
+
+function shouldRetryStreamWithoutOptions(error: unknown) {
+  return error instanceof Error && /stream_options|include_usage/i.test(error.message);
 }
 
 function omitTemperature<T extends Record<string, unknown>>(body: T) {
@@ -340,10 +490,11 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     url: string,
     init?: RequestInit,
     extraHeaders?: Record<string, string>,
-    timeoutMs = 15000,
+    timeoutMs = DEFAULT_PROVIDER_TIMEOUT_MS,
     monitor?: AiMonitorContext,
     options?: {
       suppressUsageLog?: boolean;
+      parseStream?: (response: Response) => Promise<string>;
     },
   ) {
     const controller = new AbortController();
@@ -370,7 +521,9 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         signal: controller.signal,
       });
 
-      const body = await response.text();
+      const body = response.ok && options?.parseStream
+        ? await options.parseStream(response)
+        : await response.text();
       if (!options?.suppressUsageLog) {
         await logApiUsage({
           providerBaseUrl: normalizeBaseUrl(this.baseUrl),
@@ -430,8 +583,9 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     monitor?: AiMonitorContext,
     options?: {
       suppressUsageLog?: boolean;
+      parseStream?: (response: Response) => Promise<string>;
     },
-  ) {
+  ): Promise<RawProviderResponse> {
     const urls = this.buildRequestUrls(path);
     if (urls.length === 1 || options?.suppressUsageLog) {
       const response = await this.fetchRaw(urls[0], init, undefined, timeoutMs, monitor, options);
@@ -449,7 +603,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
       success: boolean;
       errorMessage: string | null;
     }> = [];
-    let lastResponse: Awaited<ReturnType<typeof this.fetchRaw>> | null = null;
+    let lastResponse: RawProviderResponse | null = null;
     let lastUrl = urls[0];
     let lastError: unknown = null;
 
@@ -540,7 +694,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
 
     if (!lastResponse && lastError) {
       if ((lastError as Error)?.name === "AbortError") {
-        throw new Error(`Provider request timed out after ${timeoutMs ?? 15000}ms: ${lastUrl}`);
+        throw new Error(`Provider request timed out after ${timeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS}ms: ${lastUrl}`);
       }
       throw lastError;
     }
@@ -548,8 +702,17 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     return finalResponse;
   }
 
-  private async requestJson<T>(path: string, init?: RequestInit, timeoutMs?: number, monitor?: AiMonitorContext) {
-    const response = await this.requestRaw(path, init, timeoutMs, monitor);
+  private async requestJson<T>(
+    path: string,
+    init?: RequestInit,
+    timeoutMs?: number,
+    monitor?: AiMonitorContext,
+    options?: {
+      suppressUsageLog?: boolean;
+      parseStream?: (response: Response) => Promise<string>;
+    },
+  ) {
+    const response = await this.requestRaw(path, init, timeoutMs, monitor, options);
 
     if (!response.ok) {
       throw new Error(`Provider request failed (${response.status}): ${response.body}`);
@@ -561,6 +724,75 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
   private async requestChatCompletion<T>(
     body: Record<string, unknown>,
     timeoutMs?: number,
+    monitor?: AiMonitorContext,
+  ) {
+    const effectiveTimeoutMs = timeoutMs ?? DEFAULT_TEXT_REQUEST_TIMEOUT_MS;
+
+    try {
+      return await this.requestStreamingChatCompletion<T>(body, effectiveTimeoutMs, monitor);
+    } catch (error) {
+      if (shouldFallbackToNonStreaming(error)) {
+        return this.requestChatCompletionWithoutStream<T>(body, effectiveTimeoutMs, monitor);
+      }
+
+      if (!("temperature" in body) || !isUnsupportedTemperatureError(error)) {
+        throw error;
+      }
+
+      const fallbackBody = omitTemperature(body);
+      return this.requestStreamingChatCompletion<T>(fallbackBody, effectiveTimeoutMs, monitor).catch((streamError) => {
+        if (shouldFallbackToNonStreaming(streamError)) {
+          return this.requestChatCompletionWithoutStream<T>(fallbackBody, effectiveTimeoutMs, monitor);
+        }
+        throw streamError;
+      });
+    }
+  }
+
+  private async requestStreamingChatCompletion<T>(
+    body: Record<string, unknown>,
+    timeoutMs: number,
+    monitor?: AiMonitorContext,
+  ) {
+    try {
+      return await this.requestStreamingChatCompletionAttempt<T>(body, timeoutMs, monitor, true);
+    } catch (error) {
+      if (!shouldRetryStreamWithoutOptions(error)) {
+        throw error;
+      }
+
+      return this.requestStreamingChatCompletionAttempt<T>(body, timeoutMs, monitor, false);
+    }
+  }
+
+  private async requestStreamingChatCompletionAttempt<T>(
+    body: Record<string, unknown>,
+    timeoutMs: number,
+    monitor: AiMonitorContext | undefined,
+    includeUsage: boolean,
+  ) {
+    return this.requestJson<T>("/chat/completions", {
+      method: "POST",
+      headers: { Accept: "text/event-stream" },
+      body: JSON.stringify({
+        ...body,
+        stream: true,
+        ...(includeUsage
+          ? {
+              stream_options: {
+                include_usage: true,
+              },
+            }
+          : {}),
+      }),
+    }, timeoutMs, monitor, {
+      parseStream: readChatCompletionStream,
+    });
+  }
+
+  private async requestChatCompletionWithoutStream<T>(
+    body: Record<string, unknown>,
+    timeoutMs: number,
     monitor?: AiMonitorContext,
   ) {
     try {
@@ -620,7 +852,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     return JSON.parse(response.body) as T;
   }
 
-  private async requestGoogleJson<T>(path: string, body: unknown, timeoutMs = 45000, monitor?: AiMonitorContext) {
+  private async requestGoogleJson<T>(path: string, body: unknown, timeoutMs = DEFAULT_PROVIDER_TIMEOUT_MS, monitor?: AiMonitorContext) {
     const base = deriveGoogleBaseUrl(this.baseUrl);
     const attempts = [
       `${base}/v1${path}`,
@@ -768,7 +1000,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
           },
         ],
       },
-      Math.min(input.timeoutMs ?? 60000, 45000),
+      input.timeoutMs ?? DEFAULT_TEXT_REQUEST_TIMEOUT_MS,
     );
 
     const repairedRaw = extractTextContent(payload);
@@ -951,7 +1183,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         messages: buildMessages(input),
         temperature: 0.4,
       },
-      input.timeoutMs ?? 60000,
+      input.timeoutMs ?? DEFAULT_TEXT_REQUEST_TIMEOUT_MS,
       input.monitor,
     );
 
@@ -968,7 +1200,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         temperature: 0.2,
         response_format: { type: "json_object" },
       },
-      input.timeoutMs ?? 60000,
+      input.timeoutMs ?? DEFAULT_TEXT_REQUEST_TIMEOUT_MS,
       input.monitor,
     );
 
@@ -1013,7 +1245,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
           aspectRatio: resolveAspectRatio(input),
         },
       },
-    }, 90000, input.monitor);
+    }, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS, input.monitor);
 
     return extractGoogleImageResult(payload);
   }
@@ -1039,7 +1271,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
           data?: Array<{ url?: string; b64_json?: string; revised_prompt?: string }>;
         }>("/images/edits", fields, input.images, {
           imageFieldName,
-          timeoutMs: 90000,
+          timeoutMs: DEFAULT_IMAGE_REQUEST_TIMEOUT_MS,
           monitor: input.monitor,
         });
 
@@ -1142,7 +1374,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
           }>(attempt.path, {
             method: "POST",
             body: JSON.stringify(attempt.body),
-          }, undefined, input.monitor);
+          }, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS, input.monitor);
 
           return extractImageResult(payload);
         } catch (error) {
@@ -1163,7 +1395,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
           prompt: input.prompt,
           size: resolveOpenAiSize(input),
         }),
-      }, undefined, input.monitor);
+      }, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS, input.monitor);
 
       return extractImageResult(payload);
     } catch (error) {
@@ -1259,7 +1491,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
         }>(attempt.path, {
           method: "POST",
           body: JSON.stringify(attempt.body),
-        }, undefined, input.monitor);
+        }, DEFAULT_IMAGE_REQUEST_TIMEOUT_MS, input.monitor);
 
         return extractImageResult(payload);
       } catch (error) {

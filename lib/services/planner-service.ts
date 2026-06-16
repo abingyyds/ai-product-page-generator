@@ -698,7 +698,7 @@ async function decidePreviewConfigWithAi(projectId: string, preferredModelId?: s
     systemPrompt: "Return strict JSON only.",
     userPrompt: prompt,
     schema: previewDecisionSchema,
-    timeoutMs: 60000,
+    timeoutMs: 300000,
     monitor: {
       projectId,
       operation: "preview_count_planning",
@@ -803,7 +803,7 @@ export async function planSections(
       systemPrompt: "Return strict JSON only. sections must be complete.",
       userPrompt: prompt,
       schema: sectionPlanOutputSchema,
-      timeoutMs: 90000,
+      timeoutMs: 300000,
       monitor: {
         projectId,
         operation: "section_planning",

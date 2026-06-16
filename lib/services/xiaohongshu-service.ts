@@ -513,7 +513,7 @@ export async function planXiaohongshuPost(input: XiaohongshuPlanInput) {
     userPrompt: buildXiaohongshuPrompt({ topic, images: input.images }),
     images: input.images,
     schema: rawXiaohongshuPlanSchema,
-    timeoutMs: 90000,
+    timeoutMs: 300000,
     monitor: {
       operation: "xiaohongshu_planning",
     },
