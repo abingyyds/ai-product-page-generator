@@ -1,3 +1,5 @@
+import { Prisma } from "@prisma/client";
+
 import { prisma } from "@/lib/db/prisma";
 import { OpenAICompatibleAdapter } from "@/lib/ai/adapters/openai-compatible";
 import { normalizeDetectedModels } from "@/lib/ai/capability-detector";
@@ -254,6 +256,82 @@ async function replaceProviderModels(
   });
 }
 
+function buildProviderModelSnapshot(modelId: string): ProviderModelSnapshot {
+  const normalized = enrichModelEndpointSupport(
+    normalizeDetectedModels([{ id: modelId, label: modelId }]),
+  )[0];
+
+  return {
+    modelId: normalized.modelId,
+    label: normalized.label,
+    capabilities: normalized.capabilities as Record<string, unknown>,
+    roles: normalized.roles as Record<string, unknown>,
+    quality: normalized.quality,
+    latency: normalized.latency,
+    cost: normalized.cost,
+    isAvailable: normalized.isAvailable,
+    endpointSupport: normalized.endpointSupport,
+  };
+}
+
+async function ensureSelectedProviderModelsExist(
+  providerConfigId: string,
+  modelIds: Array<string | null | undefined>,
+) {
+  const selectedModelIds = [...new Set(modelIds.filter(Boolean) as string[])];
+  if (selectedModelIds.length === 0) {
+    return;
+  }
+
+  const existingModels = await prisma.modelProfile.findMany({
+    where: {
+      providerConfigId,
+      modelId: { in: selectedModelIds },
+    },
+    select: { modelId: true },
+  });
+  const existingModelIds = new Set(existingModels.map((model) => model.modelId));
+  const missingModelIds = selectedModelIds.filter((modelId) => !existingModelIds.has(modelId));
+
+  if (missingModelIds.length === 0) {
+    return;
+  }
+
+  const provider = await prisma.providerConfig.findUnique({
+    where: { id: providerConfigId },
+    include: { models: { select: { modelId: true } } },
+  });
+  const presetIds = new Set(OPENAI_IMAGE_MODEL_PRESETS.map((model) => model.id));
+  const canUseSupplementalPresets = provider
+    ? shouldIncludeOpenAiImagePresets(provider.baseUrl, provider.models)
+    : false;
+  const creatableModelIds = missingModelIds.filter(
+    (modelId) => canUseSupplementalPresets && presetIds.has(modelId),
+  );
+  const unsupportedModelIds = missingModelIds.filter((modelId) => !creatableModelIds.includes(modelId));
+
+  if (unsupportedModelIds.length > 0) {
+    throw new Error(`模型 ${unsupportedModelIds.join("、")} 不在当前服务的可用模型列表中，请先刷新模型后再保存。`);
+  }
+
+  await prisma.modelProfile.createMany({
+    data: creatableModelIds.map((modelId) => {
+      const model = buildProviderModelSnapshot(modelId);
+      return {
+        providerConfigId,
+        modelId: model.modelId,
+        label: model.label,
+        capabilities: model.capabilities as Prisma.InputJsonValue,
+        roles: model.roles as Prisma.InputJsonValue,
+        quality: model.quality,
+        latency: model.latency,
+        cost: model.cost,
+        isAvailable: model.isAvailable,
+      };
+    }),
+  });
+}
+
 export async function testProviderConnection(input: ProviderConnectionInput) {
   const adapter = new OpenAICompatibleAdapter(input.baseUrl, input.apiKey);
   return adapter.testConnection();
@@ -488,6 +566,14 @@ export async function updateProviderDefaultModels(
     throw new Error("未找到要保存的模型服务配置。");
   }
 
+  await ensureSelectedProviderModelsExist(providerId, [
+    defaults.analysisModelId,
+    defaults.planningModelId,
+    defaults.heroImageModelId,
+    defaults.detailImageModelId,
+    defaults.imageEditModelId,
+  ]);
+
   await prisma.providerConfig.updateMany({
     where: {
       userId: user.id,
@@ -517,10 +603,13 @@ export async function updateProviderDefaultModels(
 
   for (const [field, modelId] of updates) {
     if (!modelId) continue;
-    await prisma.modelProfile.updateMany({
+    const updated = await prisma.modelProfile.updateMany({
       where: { providerConfigId: providerId, modelId },
       data: { [field]: true },
     });
+    if (updated.count === 0) {
+      throw new Error(`模型 ${modelId} 不在当前服务的可用模型列表中，请先刷新模型后再保存。`);
+    }
   }
 
   await prisma.providerConfig.update({

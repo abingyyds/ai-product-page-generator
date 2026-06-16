@@ -82,12 +82,11 @@ function pickAnalysisModel(
     models: typeof provider.models,
     predicate: (model: (typeof provider.models)[number]) => boolean,
   ) => models.find(predicate)?.modelId;
+  const configuredDefault = findMatch(textVisionModels, (item) => item.isDefaultAnalysis) ??
+    findMatch(textModels, (item) => item.isDefaultAnalysis);
 
   return (
-    findMatch(
-      textVisionModels,
-      (item) => item.isDefaultAnalysis && isStableAnalysisCandidate(item.modelId),
-    ) ??
+    configuredDefault ??
     findMatch(
       textVisionModels,
       (item) => normalizeModelId(item.modelId).includes("gemini") && isStableAnalysisCandidate(item.modelId),
