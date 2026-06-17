@@ -199,6 +199,33 @@ function extractKey(data: any): { key?: string; id?: string } {
   };
 }
 
+function modelIdFrom(value: any) {
+  if (typeof value === "string") return value.trim();
+  if (!value || typeof value !== "object") return "";
+  const name = value.name;
+  if (typeof name === "string" && name.startsWith("models/")) {
+    return name.slice("models/".length).trim();
+  }
+  return String(value.model_name || value.modelName || value.model || value.id || value.name || "").trim();
+}
+
+function modelLabelFrom(value: any) {
+  if (typeof value === "string") return value;
+  return value?.display_name || value?.displayName || value?.label || value?.name || value?.model_name || value?.modelName || value?.model || value?.id;
+}
+
+function normalizeGatewayModels(rows: any[]): GatewayModel[] {
+  return rows
+    .map((row) => ({
+      id: modelIdFrom(row),
+      label: modelLabelFrom(row),
+      type: typeof row === "string" ? undefined : row?.type,
+      category: typeof row === "string" ? undefined : row?.category || row?.type,
+      modalities: typeof row !== "string" && Array.isArray(row?.modalities) ? row.modalities : undefined,
+    }))
+    .filter((item) => item.id);
+}
+
 async function requestJson(
   baseUrl: string,
   path: string,
@@ -558,14 +585,8 @@ async function fetchGatewayModels(baseUrl: string, apiKey: string): Promise<Gate
   }
 
   return extractItems(data)
-    .map((item) => ({
-      id: String(typeof item === "string" ? item : item.id || item.model || item.name || "").trim(),
-      label: typeof item === "string" ? item : item.label || item.name || item.id,
-      type: typeof item === "string" ? undefined : item.type,
-      category: typeof item === "string" ? undefined : item.category || item.type,
-      modalities: typeof item !== "string" && Array.isArray(item.modalities) ? item.modalities : undefined,
-    }))
-    .filter((item) => item.id);
+    ? normalizeGatewayModels(extractItems(data))
+    : [];
 }
 
 async function fetchGatewayAModels(account: StoredGatewayAccount): Promise<GatewayModel[]> {
@@ -581,14 +602,7 @@ async function fetchGatewayAModels(account: StoredGatewayAccount): Promise<Gatew
 
   const rows = extractItems(subscribed.data);
   if (rows.length > 0) {
-    return rows
-      .map((row) => ({
-        id: String(typeof row === "string" ? row : row.model_name || row.modelName || row.id || row.name || "").trim(),
-        label: typeof row === "string" ? row : row.name || row.model_name || row.modelName || row.id,
-        type: typeof row === "string" ? undefined : row.type,
-        category: typeof row === "string" ? undefined : row.category,
-      }))
-      .filter((item) => item.id);
+    return normalizeGatewayModels(rows);
   }
 
   return fetchGatewayModels(account.baseUrl, account.apiKey || "");
@@ -601,14 +615,7 @@ async function fetchGatewayDistModels(account: StoredGatewayAccount): Promise<Ga
   }).catch(() => ({ data: { data: [] } }));
   const rows = extractItems(listed.data);
   if (rows.length > 0) {
-    return rows
-      .map((row) => ({
-        id: String(typeof row === "string" ? row : row.model_name || row.modelName || row.id || row.name || "").trim(),
-        label: typeof row === "string" ? row : row.display_name || row.name || row.model_name || row.modelName || row.id,
-        type: typeof row === "string" ? undefined : row.type,
-        category: typeof row === "string" ? undefined : row.category || row.type,
-      }))
-      .filter((item) => item.id);
+    return normalizeGatewayModels(rows);
   }
 
   const tokenListed =
@@ -620,14 +627,7 @@ async function fetchGatewayDistModels(account: StoredGatewayAccount): Promise<Ga
       : { data: { data: [] } };
   const tokenRows = extractItems(tokenListed.data);
   if (tokenRows.length > 0) {
-    return tokenRows
-      .map((row) => ({
-        id: String(typeof row === "string" ? row : row.model_name || row.modelName || row.model || row.id || row.name || "").trim(),
-        label: typeof row === "string" ? row : row.display_name || row.name || row.model_name || row.modelName || row.model || row.id,
-        type: typeof row === "string" ? undefined : row.type,
-        category: typeof row === "string" ? undefined : row.category || row.type,
-      }))
-      .filter((item) => item.id);
+    return normalizeGatewayModels(tokenRows);
   }
 
   return fetchGatewayModels(account.baseUrl, account.apiKey || "");
@@ -1309,6 +1309,31 @@ async function completeGatewayLogin(login: GatewayLoginResult) {
   };
 }
 
+async function upgradeStoredAccountToDistributor(account: StoredGatewayAccount) {
+  if (account.provider === "sub2api" || !account.sessionCookie) return account;
+
+  const distributor = await fetchGatewayDistributorInfo(account).catch(() => null);
+  if (!distributor?.belongsToDistributor) return account;
+
+  const distProviders = getGatewayDistProvidersForDistributor(distributor, account.baseUrl);
+  const preferred = distProviders[0] ?? {
+    provider: "subrouterai_dist" as const,
+    baseUrl: account.baseUrl,
+  };
+  const distAccount: StoredGatewayAccount = {
+    ...account,
+    ...preferred,
+    provider: "subrouterai_dist",
+    baseUrl: normalizeBaseUrl(preferred.baseUrl),
+    distHost: preferred.distHost,
+  };
+
+  const key = await ensureGatewayDistKey(distAccount);
+  distAccount.apiKey = key.key;
+  distAccount.apiKeyId = key.id;
+  return distAccount;
+}
+
 export async function loginWithGatewayProviders(username: string, password: string, siteUrl?: string | null) {
   const providers = orderLoginProviders(siteUrl);
   let lastError: unknown;
@@ -1382,7 +1407,7 @@ export async function loginWithGatewayProviders(username: string, password: stri
   throw lastError instanceof Error ? lastError : new Error("账号或密码错误");
 }
 
-export async function getLatestGatewayAccount(userId: string) {
+export async function getLatestGatewayAccount(userId: string): Promise<StoredGatewayAccount | null> {
   const row = await prisma.gatewayAccount.findFirst({
     where: { userId },
     orderBy: { updatedAt: "desc" },
@@ -1391,10 +1416,11 @@ export async function getLatestGatewayAccount(userId: string) {
 }
 
 export async function refreshGatewayModelsForUser(userId: string) {
-  const account = await getLatestGatewayAccount(userId);
-  if (!account?.apiKey) {
+  const storedAccount = await getLatestGatewayAccount(userId);
+  if (!storedAccount?.apiKey) {
     throw new Error("当前账号尚未连接智能网关");
   }
+  const account = await upgradeStoredAccountToDistributor(storedAccount);
 
   const models =
     account.provider === "sub2api"

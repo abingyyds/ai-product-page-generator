@@ -615,7 +615,9 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
 
       const nextProviders = await fetchSavedProviders();
       const nextProviderId =
-        nextProviders.find((item) => isManagedGatewayProvider(item))?.id ?? selectedProviderId;
+        nextProviders.find((item) => item.isActive && isManagedGatewayProvider(item))?.id ??
+        nextProviders.find((item) => isManagedGatewayProvider(item))?.id ??
+        selectedProviderId;
       hydrateFromSavedProviders(nextProviders, nextProviderId);
       setGatewayStatus((current) =>
         current
@@ -801,7 +803,7 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
                 <p className="mt-1 text-xs text-muted-foreground">最近更新：{formatTimeLabel(selectedProvider.updatedAt)}</p>
                 {selectedProviderIsManaged ? (
                   <p className="mt-2 text-xs text-muted-foreground">
-                    此服务由当前登录账号自动维护，刷新模型会同步 SubRouter 当前账号权限，并保留仍然存在的默认模型选择。
+                    此服务由当前登录账号自动维护，刷新模型会同步当前账号权限，并保留仍然存在的默认模型选择。
                   </p>
                 ) : null}
               </div>
@@ -818,7 +820,7 @@ export function ProviderSettings({ initialProviders }: ProviderSettingsProps) {
                 <div className="space-y-2">
                   <div className="flex items-center gap-2">
                     <KeyRound className="h-4 w-4 text-emerald-700 dark:text-emerald-300" />
-                    <h3 className="font-medium text-emerald-950 dark:text-emerald-100">SubRouter 托管账号</h3>
+                    <h3 className="font-medium text-emerald-950 dark:text-emerald-100">智能网关托管账号</h3>
                   </div>
                   <p className="text-sm text-emerald-800 dark:text-emerald-200">
                     {gatewayStatusLoading

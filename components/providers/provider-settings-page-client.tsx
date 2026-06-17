@@ -111,7 +111,7 @@ export default function ProviderSettingsPageClient() {
       <PageHeader
         eyebrow="个人模型设置"
         title="AI 模型与可用性"
-        description="每个登录账号都有独立的模型服务和默认模型选择。使用 SubRouter 登录时，系统会自动托管 Key；你只需要刷新模型、检查状态并选择默认模型。"
+        description="每个登录账号都有独立的模型服务和默认模型选择。使用智能网关登录时，系统会自动托管 Key；你只需要刷新模型、检查状态并选择默认模型。"
       />
 
       {loading ? (
