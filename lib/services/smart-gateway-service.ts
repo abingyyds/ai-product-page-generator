@@ -50,6 +50,7 @@ type GatewayDistributorInfo = {
   distributorId?: string;
   distributorSlug?: string;
   distributorName?: string;
+  distributorHost?: string;
   status?: number;
 };
 
@@ -131,7 +132,19 @@ function distContextHeaders(config: { distHost?: string | null }): Record<string
 }
 
 function extractItems(data: any): any[] {
-  const candidates = [data?.data?.items, data?.data?.data, data?.data, data?.items, data];
+  const candidates = [
+    data?.data?.items,
+    data?.data?.models,
+    data?.data?.list,
+    data?.data?.rows,
+    data?.data?.data,
+    data?.data,
+    data?.items,
+    data?.models,
+    data?.list,
+    data?.rows,
+    data,
+  ];
   for (const item of candidates) {
     if (Array.isArray(item)) return item;
   }
@@ -145,14 +158,35 @@ function extractUser(data: any): Record<string, any> {
 function extractDistributorInfo(data: any): GatewayDistributorInfo | null {
   const body = data?.data || data;
   if (!body || typeof body !== "object") return null;
-  const distributor = body.distributor && typeof body.distributor === "object" ? body.distributor : {};
-  const distributorId = body.distributor_id ?? distributor.id;
+  const distributor =
+    body.distributor && typeof body.distributor === "object"
+      ? body.distributor
+      : body.site && typeof body.site === "object"
+        ? body.site
+        : {};
+  const distributorId = body.distributor_id ?? body.distributorId ?? distributor.id ?? distributor.distributor_id;
+  const distributorHost = normalizeHost(
+    body.site_host ||
+      body.siteHost ||
+      body.api_host ||
+      body.apiHost ||
+      body.host ||
+      distributor.site_host ||
+      distributor.siteHost ||
+      distributor.api_host ||
+      distributor.apiHost ||
+      distributor.host ||
+      distributor.domain,
+  );
+  const belongs =
+    body.belongs_to_distributor ?? body.belongsToDistributor ?? body.belongs ?? Number(distributorId || 0) > 0;
 
   return {
-    belongsToDistributor: Boolean(body.belongs_to_distributor) || Number(distributorId || 0) > 0,
+    belongsToDistributor: Boolean(belongs),
     distributorId: distributorId != null ? String(distributorId) : undefined,
-    distributorSlug: distributor.slug ? String(distributor.slug) : undefined,
-    distributorName: distributor.name ? String(distributor.name) : undefined,
+    distributorSlug: distributor.slug || body.distributor_slug ? String(distributor.slug || body.distributor_slug) : undefined,
+    distributorName: distributor.name || body.distributor_name ? String(distributor.name || body.distributor_name) : undefined,
+    distributorHost: distributorHost || undefined,
     status: distributor.status != null ? Number(distributor.status) : undefined,
   };
 }
@@ -525,11 +559,11 @@ async function fetchGatewayModels(baseUrl: string, apiKey: string): Promise<Gate
 
   return extractItems(data)
     .map((item) => ({
-      id: String(item.id || item.model || item.name || "").trim(),
-      label: item.label || item.name || item.id,
-      type: item.type,
-      category: item.category || item.type,
-      modalities: Array.isArray(item.modalities) ? item.modalities : undefined,
+      id: String(typeof item === "string" ? item : item.id || item.model || item.name || "").trim(),
+      label: typeof item === "string" ? item : item.label || item.name || item.id,
+      type: typeof item === "string" ? undefined : item.type,
+      category: typeof item === "string" ? undefined : item.category || item.type,
+      modalities: typeof item !== "string" && Array.isArray(item.modalities) ? item.modalities : undefined,
     }))
     .filter((item) => item.id);
 }
@@ -549,10 +583,10 @@ async function fetchGatewayAModels(account: StoredGatewayAccount): Promise<Gatew
   if (rows.length > 0) {
     return rows
       .map((row) => ({
-        id: String(row.model_name || row.modelName || row.id || row.name || "").trim(),
-        label: row.name || row.model_name || row.modelName || row.id,
-        type: row.type,
-        category: row.category,
+        id: String(typeof row === "string" ? row : row.model_name || row.modelName || row.id || row.name || "").trim(),
+        label: typeof row === "string" ? row : row.name || row.model_name || row.modelName || row.id,
+        type: typeof row === "string" ? undefined : row.type,
+        category: typeof row === "string" ? undefined : row.category,
       }))
       .filter((item) => item.id);
   }
@@ -569,10 +603,29 @@ async function fetchGatewayDistModels(account: StoredGatewayAccount): Promise<Ga
   if (rows.length > 0) {
     return rows
       .map((row) => ({
-        id: String(row.model_name || row.modelName || row.id || row.name || "").trim(),
-        label: row.display_name || row.name || row.model_name || row.modelName || row.id,
-        type: row.type,
-        category: row.category || row.type,
+        id: String(typeof row === "string" ? row : row.model_name || row.modelName || row.id || row.name || "").trim(),
+        label: typeof row === "string" ? row : row.display_name || row.name || row.model_name || row.modelName || row.id,
+        type: typeof row === "string" ? undefined : row.type,
+        category: typeof row === "string" ? undefined : row.category || row.type,
+      }))
+      .filter((item) => item.id);
+  }
+
+  const tokenListed =
+    account.apiKeyId && account.distHost
+      ? await requestJson(account.baseUrl, `/api/dist/token/${account.apiKeyId}/models`, {
+          method: "GET",
+          headers: authHeadersForGateway(account),
+        }).catch(() => ({ data: { data: [] } }))
+      : { data: { data: [] } };
+  const tokenRows = extractItems(tokenListed.data);
+  if (tokenRows.length > 0) {
+    return tokenRows
+      .map((row) => ({
+        id: String(typeof row === "string" ? row : row.model_name || row.modelName || row.model || row.id || row.name || "").trim(),
+        label: typeof row === "string" ? row : row.display_name || row.name || row.model_name || row.modelName || row.model || row.id,
+        type: typeof row === "string" ? undefined : row.type,
+        category: typeof row === "string" ? undefined : row.category || row.type,
       }))
       .filter((item) => item.id);
   }
@@ -1054,6 +1107,7 @@ function getDistSubdomainSuffixes() {
 
 function inferDistHostFromInfo(info?: GatewayDistributorInfo | null) {
   if (!info?.belongsToDistributor) return "";
+  if (info.distributorHost) return normalizeHost(info.distributorHost);
 
   const hostMap = parseDistHostMap(
     process.env.BANANA_MALL_GATEWAY_DIST_HOSTS ||
@@ -1164,12 +1218,17 @@ function getGatewayDistProvidersForDistributor(
   mainBaseUrl: string,
   siteUrl?: string | null,
 ) {
-  const providers: Array<Partial<GatewayLoginProviderConfig>> = [
-    { provider: "subrouterai_dist", baseUrl: mainBaseUrl },
-    ...getGatewayDistLoginProviders(siteUrl),
-  ];
+  const providers: Array<Partial<GatewayLoginProviderConfig>> = [];
   const distHost = inferDistHostFromInfo(info);
   const mappedBaseUrl = getDistBaseUrlFromInfo(info);
+
+  if (distHost) {
+    providers.push({
+      provider: "subrouterai_dist",
+      baseUrl: mainBaseUrl,
+      distHost,
+    });
+  }
 
   if (mappedBaseUrl) {
     providers.push({
@@ -1180,19 +1239,14 @@ function getGatewayDistProvidersForDistributor(
   }
 
   if (distHost) {
-    providers.push(
-      {
-        provider: "subrouterai_dist",
-        baseUrl: mainBaseUrl,
-        distHost,
-      },
-      {
-        provider: "subrouterai_dist",
-        baseUrl: normalizeBaseUrl(distHost),
-        distHost,
-      },
-    );
+    providers.push({
+      provider: "subrouterai_dist",
+      baseUrl: normalizeBaseUrl(distHost),
+      distHost,
+    });
   }
+
+  providers.push(...getGatewayDistLoginProviders(siteUrl), { provider: "subrouterai_dist", baseUrl: mainBaseUrl });
 
   return normalizeLoginProviders(providers);
 }
@@ -1278,13 +1332,18 @@ export async function loginWithGatewayProviders(username: string, password: stri
           }
 
           let distError: unknown;
+          let emptyModelResult: Awaited<ReturnType<typeof completeGatewayLogin>> | null = null;
           for (const distProvider of distProviders) {
             try {
-              return await completeGatewayLogin({
+              const result = await completeGatewayLogin({
                 ...login,
                 ...distProvider,
                 provider: "subrouterai_dist",
               });
+              if (result.models.length > 0 || !distProvider.distHost) {
+                return result;
+              }
+              emptyModelResult = result;
             } catch (error) {
               distError = error;
             }
@@ -1295,6 +1354,10 @@ export async function loginWithGatewayProviders(username: string, password: stri
           );
           if (!hasDistContext && needsDistSiteAddress(distError)) {
             throw new Error("当前账号属于分站，请填写站点地址后登录，或联系管理员升级网关接口。");
+          }
+
+          if (emptyModelResult) {
+            return emptyModelResult;
           }
 
           throw distError instanceof Error
