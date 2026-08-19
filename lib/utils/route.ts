@@ -55,6 +55,10 @@ export function handleRouteError(error: unknown) {
   }
 
   if (error instanceof Error) {
+    const typedError = error as Error & { code?: string; status?: number };
+    if (typedError.code?.startsWith("GATEWAY_TWO_FACTOR_")) {
+      return fail(typedError.code, error.message, null, typedError.status ?? 401);
+    }
     if (error.message === "AUTH_REQUIRED") {
       return fail("AUTH_REQUIRED", "请先登录。", null, 401);
     }

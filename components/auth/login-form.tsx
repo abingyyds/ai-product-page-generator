@@ -14,6 +14,8 @@ export function LoginForm() {
   const searchParams = useSearchParams();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [twoFactorCode, setTwoFactorCode] = useState("");
+  const [requiresTwoFactor, setRequiresTwoFactor] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -28,16 +30,21 @@ export function LoginForm() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({
+          username,
+          password,
+          ...(twoFactorCode.trim() ? { twoFactorCode: twoFactorCode.trim() } : {}),
+        }),
       });
       const payload = await response.json();
 
       if (!response.ok || !payload.success) {
+        if (payload.error?.code === "GATEWAY_TWO_FACTOR_REQUIRED") setRequiresTwoFactor(true);
         throw new Error(payload.error?.message ?? "登录失败");
       }
 
       const next = searchParams.get("next");
-      router.replace(next && next.startsWith("/") ? next : "/");
+      router.replace(next && next.startsWith("/") ? next : "/settings/providers?onboarding=1");
       router.refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : "登录失败");
@@ -72,6 +79,20 @@ export function LoginForm() {
               required
             />
           </div>
+          {requiresTwoFactor ? (
+            <div className="space-y-2">
+              <Label htmlFor="twoFactorCode">SubRouter 双重验证码</Label>
+              <Input
+                id="twoFactorCode"
+                autoComplete="one-time-code"
+                inputMode="numeric"
+                value={twoFactorCode}
+                onChange={(event) => setTwoFactorCode(event.target.value)}
+                placeholder="请输入 2FA 验证码"
+                required
+              />
+            </div>
+          ) : null}
           <div className="space-y-2">
             <Label htmlFor="password">密码</Label>
             <Input

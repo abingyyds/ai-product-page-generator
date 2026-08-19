@@ -17,6 +17,8 @@ type GatewayLoginOptions = GatewayLoginProviderConfig & {
   username: string;
   password: string;
   timeoutMs?: number;
+  turnstileToken?: string;
+  twoFactorCode?: string;
 };
 
 type GatewayLoginResult = GatewayLoginProviderConfig & {
@@ -84,6 +86,25 @@ function buildCookie(headers: Headers) {
     .map((item) => item.split(";")[0])
     .filter(Boolean)
     .join("; ");
+}
+
+function mergeCookies(...values: string[]) {
+  const cookies = new Map<string, string>();
+  for (const value of values) {
+    for (const part of String(value || '').split(';')) {
+      const separator = part.indexOf('=');
+      if (separator <= 0) continue;
+      cookies.set(part.slice(0, separator).trim(), part.slice(separator + 1).trim());
+    }
+  }
+  return [...cookies.entries()].map(([name, value]) => `${name}=${value}`).join('; ');
+}
+
+function gatewayLoginError(message: string, code: string): Error & { code: string; status: number } {
+  const error = new Error(message) as Error & { code: string; status: number };
+  error.code = code;
+  error.status = 401;
+  return error;
 }
 
 function bearer(apiKey: string) {
@@ -229,13 +250,16 @@ function normalizeGatewayModels(rows: any[]): GatewayModel[] {
 async function requestJson(
   baseUrl: string,
   path: string,
-  options: RequestInit & { timeoutMs?: number; distHost?: string | null } = {},
+  options: RequestInit & { timeoutMs?: number; distHost?: string | null; turnstileToken?: string } = {},
 ) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 30000);
 
   try {
-    const response = await fetch(`${apiBase(baseUrl)}${path}`, {
+    const requestPath = options.turnstileToken?.trim()
+      ? `${path}${path.includes('?') ? '&' : '?'}turnstile=${encodeURIComponent(options.turnstileToken.trim())}`
+      : path;
+    const response = await fetch(`${apiBase(baseUrl)}${requestPath}`, {
       ...options,
       signal: controller.signal,
       headers: {
@@ -310,18 +334,43 @@ async function loginGatewayA(options: GatewayLoginOptions): Promise<GatewayLogin
       password: options.password,
     }),
     timeoutMs: options.timeoutMs,
+    turnstileToken: options.turnstileToken,
   });
 
   if ((data as any)?.success === false) {
     throw new Error((data as any)?.message || "登录失败");
   }
 
-  const cookie = buildCookie(response.headers);
+  let cookie = buildCookie(response.headers);
+  let user = extractUser(data);
+  const loginBody = (data as any)?.data || data as any;
+  const requiresTwoFactor = loginBody?.require_2fa ?? loginBody?.require2fa ?? (data as any)?.require_2fa ?? (data as any)?.require2fa;
+  let finalData = data;
+  if (requiresTwoFactor) {
+    if (!options.twoFactorCode?.trim()) throw gatewayLoginError("该 SubRouter 账号启用了双重验证，请输入验证码后继续", "GATEWAY_TWO_FACTOR_REQUIRED");
+    if (!cookie) throw gatewayLoginError("双重验证会话已失效，请重新登录", "GATEWAY_TWO_FACTOR_SESSION_EXPIRED");
+    let verification;
+    try {
+      verification = await requestJson(options.baseUrl, "/api/user/login/2fa", {
+        method: "POST",
+        headers: { Cookie: cookie },
+        body: JSON.stringify({ code: options.twoFactorCode.trim() }),
+      });
+    } catch (error) {
+      throw gatewayLoginError(error instanceof Error ? error.message : "双重验证码错误", "GATEWAY_TWO_FACTOR_INVALID");
+    }
+    if ((verification.data as any)?.success === false) {
+      throw gatewayLoginError((verification.data as any)?.message || "双重验证码错误", "GATEWAY_TWO_FACTOR_INVALID");
+    }
+    cookie = mergeCookies(cookie, buildCookie(verification.response.headers));
+    finalData = verification.data;
+    const verifiedUser = extractUser(finalData);
+    if (verifiedUser.id != null || verifiedUser.username || verifiedUser.email) user = verifiedUser;
+  }
   if (!cookie) {
     throw new Error("登录成功但未返回会话信息");
   }
 
-  const user = extractUser(data);
   return {
     provider: "subrouterai",
     baseUrl: normalizeBaseUrl(options.baseUrl),
@@ -342,18 +391,43 @@ async function loginGatewayDist(options: GatewayLoginOptions): Promise<GatewayLo
       password: options.password,
     }),
     timeoutMs: options.timeoutMs,
+    turnstileToken: options.turnstileToken,
   });
 
   if ((data as any)?.success === false) {
     throw new Error((data as any)?.message || "登录失败");
   }
 
-  const cookie = buildCookie(response.headers);
+  let cookie = buildCookie(response.headers);
+  let finalData = data;
+  let user = extractUser(data);
+  const loginBody = (data as any)?.data || data as any;
+  const requiresTwoFactor = loginBody?.require_2fa ?? loginBody?.require2fa ?? (data as any)?.require_2fa ?? (data as any)?.require2fa;
+  if (requiresTwoFactor) {
+    if (!options.twoFactorCode?.trim()) throw gatewayLoginError("该 SubRouter 账号启用了双重验证，请输入验证码后继续", "GATEWAY_TWO_FACTOR_REQUIRED");
+    if (!cookie) throw gatewayLoginError("双重验证会话已失效，请重新登录", "GATEWAY_TWO_FACTOR_SESSION_EXPIRED");
+    let verification;
+    try {
+      verification = await requestJson(options.baseUrl, "/api/user/login/2fa", {
+        method: "POST",
+        headers: { Cookie: cookie, ...distContextHeaders(options) },
+        body: JSON.stringify({ code: options.twoFactorCode.trim() }),
+      });
+    } catch (error) {
+      throw gatewayLoginError(error instanceof Error ? error.message : "双重验证码错误", "GATEWAY_TWO_FACTOR_INVALID");
+    }
+    if ((verification.data as any)?.success === false) {
+      throw gatewayLoginError((verification.data as any)?.message || "双重验证码错误", "GATEWAY_TWO_FACTOR_INVALID");
+    }
+    cookie = mergeCookies(cookie, buildCookie(verification.response.headers));
+    finalData = verification.data;
+    const verifiedUser = extractUser(finalData);
+    if (verifiedUser.id != null || verifiedUser.username || verifiedUser.email) user = verifiedUser;
+  }
   if (!cookie) {
     throw new Error("登录成功但未返回会话信息");
   }
 
-  const user = extractUser(data);
   return {
     provider: "subrouterai_dist",
     baseUrl: normalizeBaseUrl(options.baseUrl),
@@ -442,6 +516,8 @@ async function ensureGatewayAKey(account: StoredGatewayAccount) {
       remain_quota: 0,
       unlimited_quota: true,
       model_limits_enabled: false,
+      include_official_channels: true,
+      official_key_max_discount: 0,
     }),
   });
 
@@ -507,6 +583,9 @@ async function ensureGatewayDistKey(account: StoredGatewayAccount) {
       body: JSON.stringify({
         name,
         key_group_id: 0,
+        group: "subrouter",
+        include_official_channels: true,
+        official_key_max_discount: 0,
       }),
     },
   );
@@ -1334,7 +1413,12 @@ async function upgradeStoredAccountToDistributor(account: StoredGatewayAccount) 
   return distAccount;
 }
 
-export async function loginWithGatewayProviders(username: string, password: string, siteUrl?: string | null) {
+export async function loginWithGatewayProviders(
+  username: string,
+  password: string,
+  siteUrl?: string | null,
+  options: Pick<GatewayLoginOptions, "turnstileToken" | "twoFactorCode"> = {},
+) {
   const providers = orderLoginProviders(siteUrl);
   let lastError: unknown;
   let sawDistKeyError = false;
@@ -1346,6 +1430,7 @@ export async function loginWithGatewayProviders(username: string, password: stri
         username,
         password,
         timeoutMs: 10000,
+        ...options,
       });
 
       if (login.provider === "subrouterai") {
@@ -1393,6 +1478,9 @@ export async function loginWithGatewayProviders(username: string, password: stri
 
       return await completeGatewayLogin(login);
     } catch (error) {
+      if ((error as { code?: string })?.code?.startsWith("GATEWAY_TWO_FACTOR_")) {
+        throw error;
+      }
       if (isDistKeyError(error)) {
         sawDistKeyError = true;
       }

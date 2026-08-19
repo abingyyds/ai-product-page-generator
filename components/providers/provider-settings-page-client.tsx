@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Loader2 } from "lucide-react";
 
 import { ProviderSettings } from "@/components/providers/provider-settings";
@@ -53,6 +54,7 @@ export default function ProviderSettingsPageClient() {
   const [providers, setProviders] = useState<ProviderPageData>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const searchParams = useSearchParams();
 
   useEffect(() => {
     setMounted(true);
@@ -108,6 +110,14 @@ export default function ProviderSettingsPageClient() {
 
   return (
     <div className="space-y-8" suppressHydrationWarning>
+      {searchParams.get("onboarding") === "1" ? (
+        <Card className="border-primary/30 bg-primary/5">
+          <CardContent className="pt-6 text-sm">
+            <p className="font-medium">请选择默认模型</p>
+            <p className="mt-1 text-muted-foreground">SubRouter 已加载你账号可用的模型，请在下方按文本、识图和生图能力确认默认模型。</p>
+          </CardContent>
+        </Card>
+      ) : null}
       <PageHeader
         eyebrow="个人模型设置"
         title="AI 模型与可用性"
