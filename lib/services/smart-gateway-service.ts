@@ -347,7 +347,7 @@ async function loginGatewayA(options: GatewayLoginOptions): Promise<GatewayLogin
   const requiresTwoFactor = loginBody?.require_2fa ?? loginBody?.require2fa ?? (data as any)?.require_2fa ?? (data as any)?.require2fa;
   let finalData = data;
   if (requiresTwoFactor) {
-    if (!options.twoFactorCode?.trim()) throw gatewayLoginError("该 SubRouter 账号启用了双重验证，请输入验证码后继续", "GATEWAY_TWO_FACTOR_REQUIRED");
+    if (!options.twoFactorCode?.trim()) throw gatewayLoginError("该账号启用了双重验证，请输入验证码后继续", "GATEWAY_TWO_FACTOR_REQUIRED");
     if (!cookie) throw gatewayLoginError("双重验证会话已失效，请重新登录", "GATEWAY_TWO_FACTOR_SESSION_EXPIRED");
     let verification;
     try {
@@ -404,7 +404,7 @@ async function loginGatewayDist(options: GatewayLoginOptions): Promise<GatewayLo
   const loginBody = (data as any)?.data || data as any;
   const requiresTwoFactor = loginBody?.require_2fa ?? loginBody?.require2fa ?? (data as any)?.require_2fa ?? (data as any)?.require2fa;
   if (requiresTwoFactor) {
-    if (!options.twoFactorCode?.trim()) throw gatewayLoginError("该 SubRouter 账号启用了双重验证，请输入验证码后继续", "GATEWAY_TWO_FACTOR_REQUIRED");
+    if (!options.twoFactorCode?.trim()) throw gatewayLoginError("该账号启用了双重验证，请输入验证码后继续", "GATEWAY_TWO_FACTOR_REQUIRED");
     if (!cookie) throw gatewayLoginError("双重验证会话已失效，请重新登录", "GATEWAY_TWO_FACTOR_SESSION_EXPIRED");
     let verification;
     try {

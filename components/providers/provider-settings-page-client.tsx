@@ -114,7 +114,7 @@ export default function ProviderSettingsPageClient() {
         <Card className="border-primary/30 bg-primary/5">
           <CardContent className="pt-6 text-sm">
             <p className="font-medium">请选择默认模型</p>
-            <p className="mt-1 text-muted-foreground">SubRouter 已加载你账号可用的模型，请在下方按文本、识图和生图能力确认默认模型。</p>
+            <p className="mt-1 text-muted-foreground">已加载你账号可用的模型，请在下方按文本、识图和生图能力确认默认模型。</p>
           </CardContent>
         </Card>
       ) : null}

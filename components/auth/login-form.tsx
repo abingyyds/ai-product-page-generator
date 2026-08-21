@@ -81,7 +81,7 @@ export function LoginForm() {
           </div>
           {requiresTwoFactor ? (
             <div className="space-y-2">
-              <Label htmlFor="twoFactorCode">SubRouter 双重验证码</Label>
+              <Label htmlFor="twoFactorCode">双重验证码</Label>
               <Input
                 id="twoFactorCode"
                 autoComplete="one-time-code"
