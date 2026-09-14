@@ -236,6 +236,8 @@ function modelLabelFrom(value: any) {
 }
 
 function normalizeGatewayModels(rows: any[]): GatewayModel[] {
+  // 网关同一模型可能来自多个渠道，按 id 去重，否则 modelProfile 唯一索引会炸
+  const seen = new Set<string>();
   return rows
     .map((row) => ({
       id: modelIdFrom(row),
@@ -244,7 +246,7 @@ function normalizeGatewayModels(rows: any[]): GatewayModel[] {
       category: typeof row === "string" ? undefined : row?.category || row?.type,
       modalities: typeof row !== "string" && Array.isArray(row?.modalities) ? row.modalities : undefined,
     }))
-    .filter((item) => item.id);
+    .filter((item) => item.id && !seen.has(item.id) && seen.add(item.id));
 }
 
 async function requestJson(
@@ -1336,6 +1338,10 @@ function orderLoginProviders(siteUrl?: string | null) {
   return siteUrl ? [...distProviders, ...baseProviders] : [...baseProviders, ...distProviders];
 }
 
+function isRouteMissingError(error: unknown) {
+  return error instanceof Error && /^Invalid URL \(|请求失败：404/.test(error.message);
+}
+
 function isDistKeyError(error: unknown) {
   return error instanceof Error && /分站用户请使用分站密钥接口|分站密钥接口/.test(error.message);
 }
@@ -1484,7 +1490,10 @@ export async function loginWithGatewayProviders(
       if (isDistKeyError(error)) {
         sawDistKeyError = true;
       }
-      lastError = error;
+      // 路由不存在（如 SubRouter 上的 /api/v1/auth/login 404）说明该 provider 不适用，别盖掉前一个 provider 的真实错误
+      if (lastError === undefined || !isRouteMissingError(error)) {
+        lastError = error;
+      }
     }
   }
 
