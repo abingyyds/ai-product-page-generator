@@ -5,8 +5,9 @@ import { OpenAICompatibleAdapter } from "@/lib/ai/adapters/openai-compatible";
 import { normalizeDetectedModels } from "@/lib/ai/capability-detector";
 import { recommendDefaultModels } from "@/lib/ai/model-matcher";
 import { requireCurrentUser } from "@/lib/auth/session";
-import { ensureGatewayProviderForUser } from "@/lib/services/smart-gateway-service";
+import { ensureGatewayProviderForUser, isTrustedGatewayBase } from "@/lib/services/smart-gateway-service";
 import { decryptSecret, encryptSecret } from "@/lib/utils/crypto";
+import { assertPublicProviderUrl, providerUrl } from "@/lib/utils/outbound-http";
 import type {
   CapabilityMap,
   ModelDetectionResult,
@@ -337,41 +338,46 @@ export async function testProviderConnection(input: ProviderConnectionInput) {
   return adapter.testConnection();
 }
 
+function matchesSavedProviderUrl(saved: string, baseUrl: string) {
+  try {
+    return providerUrl(saved) === baseUrl;
+  } catch {
+    return false;
+  }
+}
+
 export async function resolveProviderConnectionInput(
   input: Omit<ProviderConnectionInput, "apiKey"> & { apiKey?: string | null; id?: string | null },
 ): Promise<ProviderConnectionInput> {
   const user = await requireCurrentUser();
+  const baseUrl = providerUrl(input.baseUrl);
+  if (process.env.APP_RUNTIME !== "desktop") assertPublicProviderUrl(baseUrl);
+
+  const previous = input.id
+    ? await prisma.providerConfig.findUnique({ where: { id: input.id, userId: user.id } })
+    : null;
+  if (isManagedGatewayProvider(input) || (previous && isManagedGatewayProvider(previous))) {
+    throw new Error("托管网关设置仅可通过网关登录更新");
+  }
+
   const trimmedKey = input.apiKey?.trim() ?? "";
   if (trimmedKey.length >= 6) {
-    return {
-      name: input.name,
-      baseUrl: input.baseUrl,
-      apiKey: trimmedKey,
-    };
+    return { name: input.name, baseUrl, apiKey: trimmedKey };
   }
 
-  const matchedProvider =
-    (input.id
-      ? await prisma.providerConfig.findUnique({
-          where: { id: input.id, userId: user.id },
-        })
-      : await prisma.providerConfig.findFirst({
-          where: {
-            userId: user.id,
-            OR: [{ baseUrl: input.baseUrl }, { isActive: true }],
-          },
-          orderBy: [{ isActive: "desc" }, { updatedAt: "desc" }],
-        })) ?? null;
-
+  const matchingProviders = input.id
+    ? previous ? [previous] : []
+    : await prisma.providerConfig.findMany({
+        where: { userId: user.id },
+        orderBy: [{ isActive: "desc" }, { updatedAt: "desc" }],
+      });
+  const matchedProvider = matchingProviders.find((provider) =>
+    !isManagedGatewayProvider(provider) && matchesSavedProviderUrl(provider.baseUrl, baseUrl),
+  );
   if (!matchedProvider) {
-    throw new Error("当前没有可复用的已保存 API Key，请重新输入 API Key 后再试。");
+    throw new Error("服务地址已变更或没有可复用的密钥，请输入 API Key");
   }
-
-  return {
-    name: input.name,
-    baseUrl: input.baseUrl,
-    apiKey: decryptSecret(matchedProvider.apiKeyEncrypted),
-  };
+  return { name: input.name, baseUrl, apiKey: decryptSecret(matchedProvider.apiKeyEncrypted) };
 }
 
 export async function discoverProviderModels(input: ProviderConnectionInput) {
@@ -648,6 +654,10 @@ export async function getProviderAdapter(providerId?: string): Promise<ProviderA
     throw new Error("No active provider config found.");
   }
 
+  const managedGateway = isManagedGatewayProvider(provider);
+  if (managedGateway && !isTrustedGatewayBase(provider.baseUrl)) {
+    throw new Error("网关地址未在服务器配置中授权，请重新登录");
+  }
   const apiKey = decryptSecret(provider.apiKeyEncrypted);
   const runtimeModels = hydrateProviderModels(provider.models) as unknown as RuntimeProviderModel[];
 
@@ -657,6 +667,6 @@ export async function getProviderAdapter(providerId?: string): Promise<ProviderA
       models: runtimeModels,
     },
     apiKey,
-    adapter: new OpenAICompatibleAdapter(provider.baseUrl, apiKey),
+    adapter: new OpenAICompatibleAdapter(provider.baseUrl, apiKey, managedGateway),
   };
 }

@@ -4,6 +4,7 @@ import { normalizeDetectedModels } from "@/lib/ai/capability-detector";
 import { recommendDefaultModels } from "@/lib/ai/model-matcher";
 import { prisma } from "@/lib/db/prisma";
 import { decryptSecret, encryptSecret } from "@/lib/utils/crypto";
+import { providerUrl } from "@/lib/utils/outbound-http";
 
 export type GatewayLoginProvider = "subrouterai" | "subrouterai_dist" | "sub2api";
 
@@ -254,6 +255,7 @@ async function requestJson(
   path: string,
   options: RequestInit & { timeoutMs?: number; distHost?: string | null; turnstileToken?: string } = {},
 ) {
+  const trustedBase = requireTrustedGatewayBase(baseUrl);
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 30000);
 
@@ -261,8 +263,9 @@ async function requestJson(
     const requestPath = options.turnstileToken?.trim()
       ? `${path}${path.includes('?') ? '&' : '?'}turnstile=${encodeURIComponent(options.turnstileToken.trim())}`
       : path;
-    const response = await fetch(`${apiBase(baseUrl)}${requestPath}`, {
+    const response = await fetch(`${trustedBase}${requestPath}`, {
       ...options,
+      redirect: "error",
       signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
@@ -654,7 +657,8 @@ async function ensureGatewayBKey(account: StoredGatewayAccount) {
 
 async function fetchGatewayModels(baseUrl: string, apiKey: string): Promise<GatewayModel[]> {
   if (!apiKey) return [];
-  const response = await fetch(`${gatewayBase(baseUrl)}/models`, {
+  const response = await fetch(`${requireTrustedGatewayBase(baseUrl)}/v1/models`, {
+    redirect: "error",
     headers: {
       Authorization: bearer(apiKey),
     },
@@ -755,7 +759,20 @@ async function upsertAppUser(login: GatewayLoginResult) {
         },
       });
 
-      if (legacyUser) {
+      const binding = legacyUser && login.externalUserId
+        ? await prisma.gatewayAccount.findFirst({
+            where: {
+              userId: legacyUser.id,
+              provider: externalProvider,
+              baseUrl: normalizeBaseUrl(login.baseUrl),
+              distHost: login.distHost ?? null,
+              externalUserId: login.externalUserId,
+            },
+            select: { id: true },
+          })
+        : null;
+
+      if (legacyUser && binding) {
         return prisma.appUser.update({
           where: { id: legacyUser.id },
           data: {
@@ -780,42 +797,6 @@ async function upsertAppUser(login: GatewayLoginResult) {
       externalProvider,
       ...userData,
     },
-  });
-}
-
-async function claimLegacyWorkspaceForUser(userId: string) {
-  await prisma.$transaction(async (tx) => {
-    const [ownedProjects, ownedProviders] = await Promise.all([
-      tx.project.count({
-        where: {
-          userId: {
-            not: null,
-          },
-        },
-      }),
-      tx.providerConfig.count({
-        where: {
-          userId: {
-            not: null,
-          },
-        },
-      }),
-    ]);
-
-    if (ownedProjects + ownedProviders > 0) {
-      return;
-    }
-
-    await Promise.all([
-      tx.project.updateMany({
-        where: { userId: null },
-        data: { userId },
-      }),
-      tx.providerConfig.updateMany({
-        where: { userId: null },
-        data: { userId },
-      }),
-    ]);
   });
 }
 
@@ -1211,26 +1192,6 @@ function inferDistHostFromInfo(info?: GatewayDistributorInfo | null) {
   return "";
 }
 
-function getDistBaseUrlFromInfo(info?: GatewayDistributorInfo | null) {
-  if (!info?.belongsToDistributor) return "";
-
-  const baseUrlMap = parseDistBaseUrlMap(
-    process.env.BANANA_MALL_GATEWAY_DIST_BASE_URL_MAP ||
-      process.env.BANANA_MALL_GATEWAY_DIST_URLS ||
-      process.env.SUBROUTER_DIST_BASE_URL_MAP,
-  );
-  const keys = [info.distributorId, info.distributorSlug]
-    .map((item) => String(item || "").trim().toLowerCase())
-    .filter(Boolean);
-  for (const key of keys) {
-    const baseUrl = baseUrlMap.get(key);
-    if (baseUrl) return baseUrl;
-  }
-
-  const host = inferDistHostFromInfo(info);
-  return host ? normalizeBaseUrl(host) : "";
-}
-
 export function getGatewayLoginProviders() {
   const providers: Array<Partial<GatewayLoginProviderConfig>> = [
     ...parseLoginProviderEnv(process.env.BANANA_MALL_GATEWAY_LOGIN_PROVIDERS),
@@ -1274,9 +1235,13 @@ export function getGatewayLoginProviders() {
   ]);
 }
 
-function getGatewayDistLoginProviders(siteUrl?: string | null) {
+function getGatewayDistLoginProviders() {
   const candidates = [
-    siteUrl,
+    ...parseDistBaseUrlMap(
+      process.env.BANANA_MALL_GATEWAY_DIST_BASE_URL_MAP ||
+        process.env.BANANA_MALL_GATEWAY_DIST_URLS ||
+        process.env.SUBROUTER_DIST_BASE_URL_MAP,
+    ).values(),
     process.env.BANANA_MALL_GATEWAY_DIST_BASE_URL,
     process.env.TOONFLOW_SUBROUTER_DIST_BASE_URL,
     ...parseBaseUrlList(
@@ -1294,48 +1259,45 @@ function getGatewayDistLoginProviders(siteUrl?: string | null) {
   );
 }
 
-function getGatewayDistProvidersForDistributor(
-  info: GatewayDistributorInfo | null | undefined,
-  mainBaseUrl: string,
-  siteUrl?: string | null,
-) {
-  const providers: Array<Partial<GatewayLoginProviderConfig>> = [];
+function gatewayBaseKey(value: string) {
+  try {
+    return providerUrl(apiBase(value));
+  } catch {
+    return "";
+  }
+}
+
+export function isTrustedGatewayBase(baseUrl: string) {
+  const base = gatewayBaseKey(baseUrl);
+  return Boolean(base && [...getGatewayLoginProviders(), ...getGatewayDistLoginProviders()]
+    .some((source) => gatewayBaseKey(source.baseUrl) === base));
+}
+
+function requireTrustedGatewayBase(baseUrl: string) {
+  if (!isTrustedGatewayBase(baseUrl)) {
+    throw new Error("网关地址未在服务器配置中授权，请重新登录");
+  }
+  return gatewayBaseKey(baseUrl);
+}
+
+function getGatewayDistProvidersForDistributor(info: GatewayDistributorInfo, loginBaseUrl: string) {
   const distHost = inferDistHostFromInfo(info);
-  const mappedBaseUrl = getDistBaseUrlFromInfo(info);
-
-  if (distHost) {
-    providers.push({
-      provider: "subrouterai_dist",
-      baseUrl: mainBaseUrl,
-      distHost,
-    });
-  }
-
-  if (mappedBaseUrl) {
-    providers.push({
-      provider: "subrouterai_dist",
-      baseUrl: mappedBaseUrl,
-      distHost: normalizeHost(mappedBaseUrl),
-    });
-  }
-
-  if (distHost) {
-    providers.push({
-      provider: "subrouterai_dist",
-      baseUrl: normalizeBaseUrl(distHost),
-      distHost,
-    });
-  }
-
-  providers.push(...getGatewayDistLoginProviders(siteUrl), { provider: "subrouterai_dist", baseUrl: mainBaseUrl });
-
-  return normalizeLoginProviders(providers);
+  // Keep the authenticated session on the gateway that issued it.
+  return normalizeLoginProviders([
+    ...(distHost ? [{ provider: "subrouterai_dist", baseUrl: loginBaseUrl, distHost } as const] : []),
+    { provider: "subrouterai_dist", baseUrl: loginBaseUrl },
+  ]);
 }
 
 function orderLoginProviders(siteUrl?: string | null) {
-  const distProviders = getGatewayDistLoginProviders(siteUrl);
-  const baseProviders = getGatewayLoginProviders();
-  return siteUrl ? [...distProviders, ...baseProviders] : [...baseProviders, ...distProviders];
+  const providers = normalizeLoginProviders([...getGatewayLoginProviders(), ...getGatewayDistLoginProviders()]);
+  const requested = siteUrl ? gatewayBaseKey(siteUrl) : "";
+  if (!requested) return providers;
+
+  const selected = providers.filter((source) =>
+    source.provider === "subrouterai_dist" && gatewayBaseKey(source.baseUrl) === requested,
+  );
+  return [...selected, ...providers.filter((source) => !selected.includes(source))];
 }
 
 function isRouteMissingError(error: unknown) {
@@ -1354,18 +1316,15 @@ function needsDistSiteAddress(error: unknown) {
 }
 
 async function completeGatewayLogin(login: GatewayLoginResult) {
-  const user = await upsertAppUser(login);
-  await claimLegacyWorkspaceForUser(user.id);
-  const account: StoredGatewayAccount = {
-    ...login,
-    userId: user.id,
-  };
+  const account: StoredGatewayAccount = { ...login, userId: "" };
   const key =
     account.provider === "sub2api"
       ? await ensureGatewayBKey(account)
       : account.provider === "subrouterai_dist"
         ? await ensureGatewayDistKey(account)
         : await ensureGatewayAKey(account);
+  const user = await upsertAppUser(login);
+  account.userId = user.id;
   account.apiKey = key.key;
   account.apiKeyId = key.id;
 
@@ -1442,11 +1401,7 @@ export async function loginWithGatewayProviders(
       if (login.provider === "subrouterai") {
         const distributor = await fetchGatewayDistributorInfo(login);
         if (distributor?.belongsToDistributor) {
-          const distProviders = getGatewayDistProvidersForDistributor(distributor, login.baseUrl, siteUrl);
-          if (distProviders.length === 0) {
-            throw new Error("当前账号属于分站，请填写站点地址后登录，或联系管理员配置站点地址。");
-          }
-
+          const distProviders = getGatewayDistProvidersForDistributor(distributor, login.baseUrl);
           let distError: unknown;
           let emptyModelResult: Awaited<ReturnType<typeof completeGatewayLogin>> | null = null;
           for (const distProvider of distProviders) {
@@ -1466,10 +1421,10 @@ export async function loginWithGatewayProviders(
           }
 
           const hasDistContext = distProviders.some(
-            (item) => item.distHost || normalizeBaseUrl(item.baseUrl) !== normalizeBaseUrl(login.baseUrl),
+            (item) => item.distHost,
           );
           if (!hasDistContext && needsDistSiteAddress(distError)) {
-            throw new Error("当前账号属于分站，请填写站点地址后登录，或联系管理员升级网关接口。");
+            throw new Error("当前账号属于分站，请联系管理员检查分站网关配置。");
           }
 
           if (emptyModelResult) {
@@ -1497,8 +1452,8 @@ export async function loginWithGatewayProviders(
     }
   }
 
-  if (sawDistKeyError && getGatewayDistLoginProviders(siteUrl).length === 0) {
-    throw new Error("当前账号属于分站，请填写站点地址后登录。");
+  if (sawDistKeyError && getGatewayDistLoginProviders().length === 0) {
+    throw new Error("当前账号属于分站，请联系管理员配置分站网关。");
   }
 
   throw lastError instanceof Error ? lastError : new Error("账号或密码错误");
@@ -1509,7 +1464,7 @@ export async function getLatestGatewayAccount(userId: string): Promise<StoredGat
     where: { userId },
     orderBy: { updatedAt: "desc" },
   });
-  return hydrateStoredAccount(row);
+  return row && isTrustedGatewayBase(row.baseUrl) ? hydrateStoredAccount(row) : null;
 }
 
 export async function refreshGatewayModelsForUser(userId: string) {

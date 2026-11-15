@@ -33,7 +33,7 @@ export async function POST(request: NextRequest) {
     const resolved = await resolveProviderConnectionInput(parsed);
     const savedProviderId = await saveProviderConfig({
       ...parsed,
-      apiKey: resolved.apiKey,
+      ...resolved,
     });
     const providers = await getAllProviderConfigs();
     return ok({

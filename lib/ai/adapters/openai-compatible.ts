@@ -1,3 +1,4 @@
+import { fetchPublicProvider } from "@/lib/utils/outbound-http";
 import { z } from "zod";
 
 import type {
@@ -506,7 +507,11 @@ function classifyProbeResult(status: number, body: string) {
 export class OpenAICompatibleAdapter implements ProviderAdapter {
   private preferredBaseUrl: string | null = null;
 
-  constructor(private readonly baseUrl: string, private readonly apiKey: string) {}
+  constructor(
+    private readonly baseUrl: string,
+    private readonly apiKey: string,
+    private readonly managedGateway = false,
+  ) {}
 
   private buildRequestUrls(path: string) {
     const urls = buildOpenAiCompatibleUrls(this.baseUrl, path);
@@ -547,7 +552,8 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
     const requestBytes = typeof init?.body === "string" ? Buffer.byteLength(init.body) : 0;
 
     try {
-      const response = await fetch(url, {
+      const send = this.managedGateway || process.env.APP_RUNTIME === "desktop" ? fetch : fetchPublicProvider;
+      const response = await send(url, {
         ...init,
         headers: {
           ...(typeof FormData !== "undefined" && init?.body instanceof FormData
@@ -558,6 +564,7 @@ export class OpenAICompatibleAdapter implements ProviderAdapter {
           ...(init?.headers ?? {}),
         },
         cache: "no-store",
+        redirect: "error",
         signal: controller.signal,
       });
 
